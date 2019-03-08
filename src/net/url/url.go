@@ -158,13 +158,26 @@ func shouldEscape(c byte, mode encoding) bool {
 		}
 	}
 
+	if mode == encodeFragment {
+		// RFC 3986 §2.2 allows not escaping sub-delims. A subset of sub-delims are
+		// included in reserved from RFC 2396 §2.2. The remaining sub-delims do not
+		// need to be escaped. To minimize potential breakage, we apply two restrictions:
+		// (1) we always escape sub-delims outside of the fragment, and (2) we always
+		// escape single quote to avoid breaking callers that had previously assumed that
+		// single quotes would be escaped. See issue #19917.
+		switch c {
+		case '!', '(', ')', '*':
+			return false
+		}
+	}
+
 	// Everything else must be escaped.
 	return true
 }
 
 // QueryUnescape does the inverse transformation of QueryEscape,
 // converting each 3-byte encoded substring of the form "%AB" into the
-// hex-decoded byte 0xAB. It also converts '+' into ' ' (space).
+// hex-decoded byte 0xAB.
 // It returns an error if any % is not followed by two hexadecimal
 // digits.
 func QueryUnescape(s string) (string, error) {
@@ -291,7 +304,26 @@ func escape(s string, mode encoding) string {
 		return s
 	}
 
-	t := make([]byte, len(s)+2*hexCount)
+	var buf [64]byte
+	var t []byte
+
+	required := len(s) + 2*hexCount
+	if required <= len(buf) {
+		t = buf[:required]
+	} else {
+		t = make([]byte, required)
+	}
+
+	if hexCount == 0 {
+		copy(t, s)
+		for i := 0; i < len(s); i++ {
+			if s[i] == ' ' {
+				t[i] = '+'
+			}
+		}
+		return string(t)
+	}
+
 	j := 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -480,6 +512,10 @@ func ParseRequestURI(rawurl string) (*URL, error) {
 func parse(rawurl string, viaRequest bool) (*URL, error) {
 	var rest string
 	var err error
+
+	if stringContainsCTLByte(rawurl) {
+		return nil, errors.New("net/url: invalid control character in URL")
+	}
 
 	if rawurl == "" && viaRequest {
 		return nil, errors.New("empty url")
@@ -723,6 +759,7 @@ func validOptionalPort(port string) bool {
 //
 // If u.Opaque is non-empty, String uses the first form;
 // otherwise it uses the second form.
+// Any non-ASCII characters in host are escaped.
 // To obtain the path, String uses u.EscapedPath().
 //
 // In the second form, the following rules apply:
@@ -1100,4 +1137,15 @@ func validUserinfo(s string) bool {
 		}
 	}
 	return true
+}
+
+// stringContainsCTLByte reports whether s contains any ASCII control character.
+func stringContainsCTLByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < ' ' || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux netbsd openbsd solaris
+// +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
 
 package runtime
 
@@ -440,14 +440,6 @@ func dieFromSignal(sig uint32) {
 	osyield()
 	osyield()
 
-	// On Darwin we may still fail to die, because raise sends the
-	// signal to the whole process rather than just the current thread,
-	// and osyield just sleeps briefly rather than letting all other
-	// threads run. See issue 20315. Sleep longer.
-	if GOOS == "darwin" {
-		usleep(100)
-	}
-
 	// If we are still somehow running, just exit with the wrong status.
 	exit(2)
 }
@@ -511,16 +503,14 @@ func raisebadsignal(sig uint32, c *sigctxt) {
 
 //go:nosplit
 func crash() {
-	if GOOS == "darwin" {
-		// OS X core dumps are linear dumps of the mapped memory,
-		// from the first virtual byte to the last, with zeros in the gaps.
-		// Because of the way we arrange the address space on 64-bit systems,
-		// this means the OS X core file will be >128 GB and even on a zippy
-		// workstation can take OS X well over an hour to write (uninterruptible).
-		// Save users from making that mistake.
-		if GOARCH == "amd64" {
-			return
-		}
+	// OS X core dumps are linear dumps of the mapped memory,
+	// from the first virtual byte to the last, with zeros in the gaps.
+	// Because of the way we arrange the address space on 64-bit systems,
+	// this means the OS X core file will be >128 GB and even on a zippy
+	// workstation can take OS X well over an hour to write (uninterruptible).
+	// Save users from making that mistake.
+	if GOOS == "darwin" && GOARCH == "amd64" {
+		return
 	}
 
 	dieFromSignal(_SIGABRT)
@@ -781,7 +771,7 @@ func unminitSignals() {
 	}
 }
 
-// blockableSig returns whether sig may be blocked by the signal mask.
+// blockableSig reports whether sig may be blocked by the signal mask.
 // We never want to block the signals marked _SigUnblock;
 // these are the synchronous signals that turn into a Go panic.
 // In a Go program--not a c-archive/c-shared--we never want to block

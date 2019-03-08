@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -42,6 +41,10 @@ func objdumpOutput(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpdir)
+	err = ioutil.WriteFile(filepath.Join(tmpdir, "go.mod"), []byte("module issue19518\n"), 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tmpfile, err := os.Create(filepath.Join(tmpdir, "input.s"))
 	if err != nil {
 		t.Fatal(err)
@@ -68,13 +71,8 @@ func objdumpOutput(t *testing.T) []byte {
 		testenv.GoToolPath(t), "build", "-o",
 		filepath.Join(tmpdir, "output"))
 
-	var env []string
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "GOARCH=") {
-			env = append(env, v)
-		}
-	}
-	cmd.Env = append(env, "GOARCH=amd64")
+	cmd.Env = append(os.Environ(), "GOARCH=amd64", "GOOS=linux")
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("error %s output %s", err, out)

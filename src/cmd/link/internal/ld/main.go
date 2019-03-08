@@ -34,6 +34,7 @@ import (
 	"bufio"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
+	"cmd/link/internal/sym"
 	"flag"
 	"log"
 	"os"
@@ -87,7 +88,6 @@ var (
 
 	FlagRound       = flag.Int("R", -1, "set address rounding `quantum`")
 	FlagTextAddr    = flag.Int64("T", -1, "set text segment `address`")
-	FlagDataAddr    = flag.Int64("D", -1, "set data segment `address`")
 	flagEntrySymbol = flag.String("E", "", "set `entry` symbol name")
 
 	cpuprofile     = flag.String("cpuprofile", "", "write cpu profile to `file`")
@@ -122,6 +122,7 @@ func Main(arch *sys.Arch, theArch Arch) {
 	flag.BoolVar(&ctxt.linkShared, "linkshared", false, "link against installed Go shared libraries")
 	flag.Var(&ctxt.LinkMode, "linkmode", "set link `mode`")
 	flag.Var(&ctxt.BuildMode, "buildmode", "set build `mode`")
+	flag.BoolVar(&ctxt.compressDWARF, "compressdwarf", true, "compress DWARF if possible")
 	objabi.Flagfn1("B", "add an ELF NT_GNU_BUILD_ID `note` when using ELF", addbuildinfo)
 	objabi.Flagfn1("L", "add specified `directory` to library path", func(a string) { Lflag(ctxt, a) })
 	objabi.AddVersionFlag() // -V
@@ -141,6 +142,10 @@ func Main(arch *sys.Arch, theArch Arch) {
 			Errorf(nil, "%v", err)
 			usage()
 		}
+	}
+
+	if objabi.Fieldtrack_enabled != 0 {
+		ctxt.Reachparent = make(map[*sym.Symbol]*sym.Symbol)
 	}
 
 	startProfile()
@@ -175,7 +180,7 @@ func Main(arch *sys.Arch, theArch Arch) {
 	}
 
 	if ctxt.Debugvlog != 0 {
-		ctxt.Logf("HEADER = -H%d -T0x%x -D0x%x -R0x%x\n", ctxt.HeadType, uint64(*FlagTextAddr), uint64(*FlagDataAddr), uint32(*FlagRound))
+		ctxt.Logf("HEADER = -H%d -T0x%x -R0x%x\n", ctxt.HeadType, uint64(*FlagTextAddr), uint32(*FlagRound))
 	}
 
 	switch ctxt.BuildMode {
@@ -202,7 +207,11 @@ func Main(arch *sys.Arch, theArch Arch) {
 
 	ctxt.dostrdata()
 	deadcode(ctxt)
-	fieldtrack(ctxt)
+	dwarfGenerateDebugInfo(ctxt)
+	if objabi.Fieldtrack_enabled != 0 {
+		fieldtrack(ctxt)
+	}
+	ctxt.mangleTypeSym()
 	ctxt.callgraph()
 
 	ctxt.doelf()
@@ -212,7 +221,12 @@ func Main(arch *sys.Arch, theArch Arch) {
 	ctxt.dostkcheck()
 	if ctxt.HeadType == objabi.Hwindows {
 		ctxt.dope()
+		ctxt.windynrelocsyms()
 	}
+	if ctxt.HeadType == objabi.Haix {
+		ctxt.doxcoff()
+	}
+
 	ctxt.addexport()
 	thearch.Gentext(ctxt) // trampolines, call stubs, etc.
 	ctxt.textbuildid()
@@ -222,8 +236,10 @@ func Main(arch *sys.Arch, theArch Arch) {
 	ctxt.typelink()
 	ctxt.symtab()
 	ctxt.dodata()
-	ctxt.address()
+	order := ctxt.address()
 	ctxt.reloc()
+	dwarfcompress(ctxt)
+	ctxt.layout(order)
 	thearch.Asmb(ctxt)
 	ctxt.undef()
 	ctxt.hostlink()

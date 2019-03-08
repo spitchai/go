@@ -20,9 +20,12 @@ type SysProcIDMap struct {
 }
 
 type SysProcAttr struct {
-	Chroot       string         // Chroot.
-	Credential   *Credential    // Credential.
-	Ptrace       bool           // Enable tracing.
+	Chroot     string      // Chroot.
+	Credential *Credential // Credential.
+	// Ptrace tells the child to call ptrace(PTRACE_TRACEME).
+	// Call runtime.LockOSThread before starting a process with this set,
+	// and don't call UnlockOSThread until done with PtraceSyscall calls.
+	Ptrace       bool
 	Setsid       bool           // Create session.
 	Setpgid      bool           // Set process group ID to Pgid, or, if Pgid == 0, to new pid.
 	Setctty      bool           // Set controlling terminal to fd Ctty (only meaningful if Setsid is set)
@@ -151,7 +154,7 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 	runtime_BeforeFork()
 	locked = true
 	switch {
-	case runtime.GOARCH == "amd64" && sys.Cloneflags&CLONE_NEWUSER == 0:
+	case runtime.GOARCH == "amd64" && (sys.Cloneflags&CLONE_NEWUSER == 0 && sys.Unshareflags&CLONE_NEWUSER == 0):
 		r1, err1 = rawVforkSyscall(SYS_CLONE, uintptr(SIGCHLD|CLONE_VFORK|CLONE_VM)|sys.Cloneflags)
 	case runtime.GOARCH == "s390x":
 		r1, _, err1 = RawSyscall6(SYS_CLONE, 0, uintptr(SIGCHLD)|sys.Cloneflags, 0, 0, 0, 0)

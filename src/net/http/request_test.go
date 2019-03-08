@@ -8,12 +8,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
 	. "net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"reflect"
@@ -878,7 +880,7 @@ func testMissingFile(t *testing.T, req *Request) {
 }
 
 func newTestMultipartRequest(t *testing.T) *Request {
-	b := strings.NewReader(strings.Replace(message, "\n", "\r\n", -1))
+	b := strings.NewReader(strings.ReplaceAll(message, "\n", "\r\n"))
 	req, err := NewRequest("POST", "/", b)
 	if err != nil {
 		t.Fatal("NewRequest:", err)
@@ -970,8 +972,8 @@ Content-Disposition: form-data; name="textb"
 `
 
 func benchmarkReadRequest(b *testing.B, request string) {
-	request = request + "\n"                             // final \n
-	request = strings.Replace(request, "\n", "\r\n", -1) // expand \n to \r\n
+	request = request + "\n"                            // final \n
+	request = strings.ReplaceAll(request, "\n", "\r\n") // expand \n to \r\n
 	b.SetBytes(int64(len(request)))
 	r := bufio.NewReader(&infiniteReader{buf: []byte(request)})
 	b.ReportAllocs()
@@ -1045,4 +1047,93 @@ func BenchmarkReadRequestWrk(b *testing.B) {
 	benchmarkReadRequest(b, `GET / HTTP/1.1
 Host: localhost:8080
 `)
+}
+
+const (
+	withTLS = true
+	noTLS   = false
+)
+
+func BenchmarkFileAndServer_1KB(b *testing.B) {
+	benchmarkFileAndServer(b, 1<<10)
+}
+
+func BenchmarkFileAndServer_16MB(b *testing.B) {
+	benchmarkFileAndServer(b, 1<<24)
+}
+
+func BenchmarkFileAndServer_64MB(b *testing.B) {
+	benchmarkFileAndServer(b, 1<<26)
+}
+
+func benchmarkFileAndServer(b *testing.B, n int64) {
+	f, err := ioutil.TempFile(os.TempDir(), "go-bench-http-file-and-server")
+	if err != nil {
+		b.Fatalf("Failed to create temp file: %v", err)
+	}
+
+	defer func() {
+		f.Close()
+		os.RemoveAll(f.Name())
+	}()
+
+	if _, err := io.CopyN(f, rand.Reader, n); err != nil {
+		b.Fatalf("Failed to copy %d bytes: %v", n, err)
+	}
+
+	b.Run("NoTLS", func(b *testing.B) {
+		runFileAndServerBenchmarks(b, noTLS, f, n)
+	})
+
+	b.Run("TLS", func(b *testing.B) {
+		runFileAndServerBenchmarks(b, withTLS, f, n)
+	})
+}
+
+func runFileAndServerBenchmarks(b *testing.B, tlsOption bool, f *os.File, n int64) {
+	handler := HandlerFunc(func(rw ResponseWriter, req *Request) {
+		defer req.Body.Close()
+		nc, err := io.Copy(ioutil.Discard, req.Body)
+		if err != nil {
+			panic(err)
+		}
+
+		if nc != n {
+			panic(fmt.Errorf("Copied %d Wanted %d bytes", nc, n))
+		}
+	})
+
+	var cst *httptest.Server
+	if tlsOption == withTLS {
+		cst = httptest.NewTLSServer(handler)
+	} else {
+		cst = httptest.NewServer(handler)
+	}
+
+	defer cst.Close()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Perform some setup.
+		b.StopTimer()
+		if _, err := f.Seek(0, 0); err != nil {
+			b.Fatalf("Failed to seek back to file: %v", err)
+		}
+
+		b.StartTimer()
+		req, err := NewRequest("PUT", cst.URL, ioutil.NopCloser(f))
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		req.ContentLength = n
+		// Prevent mime sniffing by setting the Content-Type.
+		req.Header.Set("Content-Type", "application/octet-stream")
+		res, err := cst.Client().Do(req)
+		if err != nil {
+			b.Fatalf("Failed to make request to backend: %v", err)
+		}
+
+		res.Body.Close()
+		b.SetBytes(n)
+	}
 }

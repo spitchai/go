@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build nacl
+// +build nacl js,wasm
 
 package poll
 
@@ -41,6 +41,9 @@ func (pd *pollDesc) prepareWrite(isFile bool) error { return pd.prepare('w', isF
 func (pd *pollDesc) wait(mode int, isFile bool) error {
 	if pd.closing {
 		return errClosing(isFile)
+	}
+	if isFile { // TODO(neelance): wasm: Use callbacks from JS to block until the read/write finished.
+		return nil
 	}
 	return ErrTimeout
 }
@@ -89,8 +92,8 @@ func setDeadlineImpl(fd *FD, t time.Time, mode int) error {
 	return nil
 }
 
-// PollDescriptor returns the descriptor being used by the poller,
-// or ^uintptr(0) if there isn't one. This is only used for testing.
-func PollDescriptor() uintptr {
-	return ^uintptr(0)
+// IsPollDescriptor reports whether fd is the descriptor being used by the poller.
+// This is only used for testing.
+func IsPollDescriptor(fd uintptr) bool {
+	return false
 }

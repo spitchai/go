@@ -1,3 +1,7 @@
+// Copyright 2018 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package main
 
 import (
@@ -331,7 +335,7 @@ func analyzeAnnotations() (annotationAnalysisResult, error) {
 			if si != sj {
 				return si < sj
 			}
-			return task.regions[i].lastTimestamp() < task.regions[i].lastTimestamp()
+			return task.regions[i].lastTimestamp() < task.regions[j].lastTimestamp()
 		})
 	}
 	return annotationAnalysisResult{tasks: tasks, regions: regions, gcEvents: gcEvents}, nil
@@ -434,8 +438,8 @@ func (task *taskDesc) complete() bool {
 	return task.create != nil && task.end != nil
 }
 
-// descendents returns all the task nodes in the subtree rooted from this task.
-func (task *taskDesc) decendents() []*taskDesc {
+// descendants returns all the task nodes in the subtree rooted from this task.
+func (task *taskDesc) descendants() []*taskDesc {
 	if task == nil {
 		return nil
 	}
@@ -503,7 +507,7 @@ func (task *taskDesc) overlappingGCDuration(evs []*trace.Event) (overlapping tim
 	return overlapping
 }
 
-// overlappingInstant returns true if the instantaneous event, ev, occurred during
+// overlappingInstant reports whether the instantaneous event, ev, occurred during
 // any of the task's region if ev is a goroutine-local event, or overlaps with the
 // task's lifetime if ev is a global event.
 func (task *taskDesc) overlappingInstant(ev *trace.Event) bool {
@@ -534,7 +538,7 @@ func (task *taskDesc) overlappingInstant(ev *trace.Event) bool {
 	return false
 }
 
-// overlappingDuration returns whether the durational event, ev, overlaps with
+// overlappingDuration reports whether the durational event, ev, overlaps with
 // any of the task's region if ev is a goroutine-local event, or overlaps with
 // the task's lifetime if ev is a global event. It returns the overlapping time
 // as well.
@@ -861,12 +865,16 @@ func (h *durationHistogram) ToHTML(urlmaker func(min, max time.Duration) string)
 	fmt.Fprintf(w, `<table>`)
 	for i := h.MinBucket; i <= h.MaxBucket; i++ {
 		// Tick label.
-		fmt.Fprintf(w, `<tr><td class="histoTime" align="right"><a href=%s>%s</a></td>`, urlmaker(h.BucketMin(i), h.BucketMin(i+1)), niceDuration(h.BucketMin(i)))
+		if h.Buckets[i] > 0 {
+			fmt.Fprintf(w, `<tr><td class="histoTime" align="right"><a href=%s>%s</a></td>`, urlmaker(h.BucketMin(i), h.BucketMin(i+1)), niceDuration(h.BucketMin(i)))
+		} else {
+			fmt.Fprintf(w, `<tr><td class="histoTime" align="right">%s</td>`, niceDuration(h.BucketMin(i)))
+		}
 		// Bucket bar.
 		width := h.Buckets[i] * barWidth / maxCount
-		fmt.Fprintf(w, `<td><div style="width:%dpx;background:blue;top:.6em;position:relative">&nbsp;</div></td>`, width)
+		fmt.Fprintf(w, `<td><div style="width:%dpx;background:blue;position:relative">&nbsp;</div></td>`, width)
 		// Bucket count.
-		fmt.Fprintf(w, `<td align="right"><div style="top:.6em;position:relative">%d</div></td>`, h.Buckets[i])
+		fmt.Fprintf(w, `<td align="right"><div style="position:relative">%d</div></td>`, h.Buckets[i])
 		fmt.Fprintf(w, "</tr>\n")
 
 	}
@@ -1151,17 +1159,17 @@ var templUserRegionType = template.Must(template.New("").Funcs(template.FuncMap{
 		d := time.Duration(nsec) * time.Nanosecond
 		return template.HTML(niceDuration(d))
 	},
-	"percent": func(dividened, divisor int64) template.HTML {
+	"percent": func(dividend, divisor int64) template.HTML {
 		if divisor == 0 {
 			return ""
 		}
-		return template.HTML(fmt.Sprintf("(%.1f%%)", float64(dividened)/float64(divisor)*100))
+		return template.HTML(fmt.Sprintf("(%.1f%%)", float64(dividend)/float64(divisor)*100))
 	},
-	"barLen": func(dividened, divisor int64) template.HTML {
+	"barLen": func(dividend, divisor int64) template.HTML {
 		if divisor == 0 {
 			return "0"
 		}
-		return template.HTML(fmt.Sprintf("%.2f%%", float64(dividened)/float64(divisor)*100))
+		return template.HTML(fmt.Sprintf("%.2f%%", float64(dividend)/float64(divisor)*100))
 	},
 	"unknownTime": func(desc regionDesc) int64 {
 		sum := desc.ExecTime + desc.IOTime + desc.BlockTime + desc.SyscallTime + desc.SchedWaitTime

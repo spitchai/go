@@ -276,7 +276,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	var phentsize, phnum int
 	var shoff int64
 	var shentsize, shnum, shstrndx int
-	shstrndx = -1
 	switch f.Class {
 	case ELFCLASS32:
 		hdr := new(Header32)
@@ -318,7 +317,11 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		shstrndx = int(hdr.Shstrndx)
 	}
 
-	if shnum > 0 && shoff > 0 && (shstrndx < 0 || shstrndx >= shnum) {
+	if shoff == 0 && shnum != 0 {
+		return nil, &FormatError{0, "invalid ELF shnum for shoff=0", shnum}
+	}
+
+	if shnum > 0 && shstrndx >= shnum {
 		return nil, &FormatError{0, "invalid ELF shstrndx", shstrndx}
 	}
 
@@ -1112,6 +1115,17 @@ func (f *File) applyRelocationsSPARC64(dst []byte, rels []byte) error {
 }
 
 func (f *File) DWARF() (*dwarf.Data, error) {
+	dwarfSuffix := func(s *Section) string {
+		switch {
+		case strings.HasPrefix(s.Name, ".debug_"):
+			return s.Name[7:]
+		case strings.HasPrefix(s.Name, ".zdebug_"):
+			return s.Name[8:]
+		default:
+			return ""
+		}
+
+	}
 	// sectionData gets the data for s, checks its size, and
 	// applies any applicable relations.
 	sectionData := func(i int, s *Section) ([]byte, error) {
@@ -1160,13 +1174,8 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 	// Don't bother loading others.
 	var dat = map[string][]byte{"abbrev": nil, "info": nil, "str": nil, "line": nil, "ranges": nil}
 	for i, s := range f.Sections {
-		suffix := ""
-		switch {
-		case strings.HasPrefix(s.Name, ".debug_"):
-			suffix = s.Name[7:]
-		case strings.HasPrefix(s.Name, ".zdebug_"):
-			suffix = s.Name[8:]
-		default:
+		suffix := dwarfSuffix(s)
+		if suffix == "" {
 			continue
 		}
 		if _, ok := dat[suffix]; !ok {
@@ -1186,16 +1195,19 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 
 	// Look for DWARF4 .debug_types sections.
 	for i, s := range f.Sections {
-		if s.Name == ".debug_types" {
-			b, err := sectionData(i, s)
-			if err != nil {
-				return nil, err
-			}
+		suffix := dwarfSuffix(s)
+		if suffix != "types" {
+			continue
+		}
 
-			err = d.AddTypes(fmt.Sprintf("types-%d", i), b)
-			if err != nil {
-				return nil, err
-			}
+		b, err := sectionData(i, s)
+		if err != nil {
+			return nil, err
+		}
+
+		err = d.AddTypes(fmt.Sprintf("types-%d", i), b)
+		if err != nil {
+			return nil, err
 		}
 	}
 

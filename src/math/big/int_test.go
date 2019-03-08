@@ -557,7 +557,7 @@ var expTests = []struct {
 	{"0x8000000000000000", "3", "6719", "5447"},
 	{"0x8000000000000000", "1000", "6719", "1603"},
 	{"0x8000000000000000", "1000000", "6719", "3199"},
-	{"0x8000000000000000", "-1000000", "6719", "1"},
+	{"0x8000000000000000", "-1000000", "6719", "3663"}, // 3663 = ModInverse(3199, 6719) Issue #25865
 
 	{"0xffffffffffffffffffffffffffffffff", "0x12345678123456781234567812345678123456789", "0x01112222333344445555666677778889", "0x36168FA1DB3AAE6C8CE647E137F97A"},
 
@@ -675,21 +675,43 @@ func checkGcd(aBytes, bBytes []byte) bool {
 	return x.Cmp(d) == 0
 }
 
-// euclidGCD is a reference implementation of Euclid's GCD
-// algorithm for testing against optimized algorithms.
+// euclidExtGCD is a reference implementation of Euclid's
+// extended GCD algorithm for testing against optimized algorithms.
 // Requirements: a, b > 0
-func euclidGCD(a, b *Int) *Int {
-
+func euclidExtGCD(a, b *Int) (g, x, y *Int) {
 	A := new(Int).Set(a)
 	B := new(Int).Set(b)
-	t := new(Int)
 
+	// A = Ua*a + Va*b
+	// B = Ub*a + Vb*b
+	Ua := new(Int).SetInt64(1)
+	Va := new(Int)
+
+	Ub := new(Int)
+	Vb := new(Int).SetInt64(1)
+
+	q := new(Int)
+	temp := new(Int)
+
+	r := new(Int)
 	for len(B.abs) > 0 {
-		// A, B = B, A % B
-		t.Rem(A, B)
-		A, B, t = B, t, A
+		q, r = q.QuoRem(A, B, r)
+
+		A, B, r = B, r, A
+
+		// Ua, Ub = Ub, Ua-q*Ub
+		temp.Set(Ub)
+		Ub.Mul(Ub, q)
+		Ub.Sub(Ua, Ub)
+		Ua.Set(temp)
+
+		// Va, Vb = Vb, Va-q*Vb
+		temp.Set(Vb)
+		Vb.Mul(Vb, q)
+		Vb.Sub(Va, Vb)
+		Va.Set(temp)
 	}
-	return A
+	return A, Ua, Va
 }
 
 func checkLehmerGcd(aBytes, bBytes []byte) bool {
@@ -700,10 +722,26 @@ func checkLehmerGcd(aBytes, bBytes []byte) bool {
 		return true // can only test positive arguments
 	}
 
-	d := new(Int).lehmerGCD(a, b)
-	d0 := euclidGCD(a, b)
+	d := new(Int).lehmerGCD(nil, nil, a, b)
+	d0, _, _ := euclidExtGCD(a, b)
 
 	return d.Cmp(d0) == 0
+}
+
+func checkLehmerExtGcd(aBytes, bBytes []byte) bool {
+	a := new(Int).SetBytes(aBytes)
+	b := new(Int).SetBytes(bBytes)
+	x := new(Int)
+	y := new(Int)
+
+	if a.Sign() <= 0 || b.Sign() <= 0 {
+		return true // can only test positive arguments
+	}
+
+	d := new(Int).lehmerGCD(x, y, a, b)
+	d0, x0, y0 := euclidExtGCD(a, b)
+
+	return d.Cmp(d0) == 0 && x.Cmp(x0) == 0 && y.Cmp(y0) == 0
 }
 
 var gcdTests = []struct {
@@ -722,9 +760,6 @@ var gcdTests = []struct {
 	{"935", "-3", "8", "64515", "24310"},
 	{"935000000000000000", "-3", "8", "64515000000000000000", "24310000000000000000"},
 	{"1", "-221", "22059940471369027483332068679400581064239780177629666810348940098015901108344", "98920366548084643601728869055592650835572950932266967461790948584315647051443", "991"},
-
-	// test early exit (after one Euclidean iteration) in binaryGCD
-	{"1", "", "", "1", "98920366548084643601728869055592650835572950932266967461790948584315647051443"},
 }
 
 func testGcd(t *testing.T, d, x, y, a, b *Int) {
@@ -755,12 +790,50 @@ func testGcd(t *testing.T, d, x, y, a, b *Int) {
 	if a2.Cmp(d) != 0 {
 		t.Errorf("aliased z = a GCD(%s, %s, %s, %s): got d = %s, want %s", x, y, a, b, a2, d)
 	}
+	if x != nil && X.Cmp(x) != 0 {
+		t.Errorf("aliased z = a GCD(%s, %s, %s, %s): got x = %s, want %s", x, y, a, b, X, x)
+	}
+	if y != nil && Y.Cmp(y) != 0 {
+		t.Errorf("aliased z = a GCD(%s, %s, %s, %s): got y = %s, want %s", x, y, a, b, Y, y)
+	}
 
 	a2 = new(Int).Set(a)
 	b2 = new(Int).Set(b)
 	b2.GCD(X, Y, a2, b2) // result is same as 2nd argument
 	if b2.Cmp(d) != 0 {
 		t.Errorf("aliased z = b GCD(%s, %s, %s, %s): got d = %s, want %s", x, y, a, b, b2, d)
+	}
+	if x != nil && X.Cmp(x) != 0 {
+		t.Errorf("aliased z = b GCD(%s, %s, %s, %s): got x = %s, want %s", x, y, a, b, X, x)
+	}
+	if y != nil && Y.Cmp(y) != 0 {
+		t.Errorf("aliased z = b GCD(%s, %s, %s, %s): got y = %s, want %s", x, y, a, b, Y, y)
+	}
+
+	a2 = new(Int).Set(a)
+	b2 = new(Int).Set(b)
+	D = new(Int).GCD(a2, b2, a2, b2) // x = a, y = b
+	if D.Cmp(d) != 0 {
+		t.Errorf("aliased x = a, y = b GCD(%s, %s, %s, %s): got d = %s, want %s", x, y, a, b, D, d)
+	}
+	if x != nil && a2.Cmp(x) != 0 {
+		t.Errorf("aliased x = a, y = b GCD(%s, %s, %s, %s): got x = %s, want %s", x, y, a, b, a2, x)
+	}
+	if y != nil && b2.Cmp(y) != 0 {
+		t.Errorf("aliased x = a, y = b GCD(%s, %s, %s, %s): got y = %s, want %s", x, y, a, b, b2, y)
+	}
+
+	a2 = new(Int).Set(a)
+	b2 = new(Int).Set(b)
+	D = new(Int).GCD(b2, a2, a2, b2) // x = b, y = a
+	if D.Cmp(d) != 0 {
+		t.Errorf("aliased x = b, y = a GCD(%s, %s, %s, %s): got d = %s, want %s", x, y, a, b, D, d)
+	}
+	if x != nil && b2.Cmp(x) != 0 {
+		t.Errorf("aliased x = b, y = a GCD(%s, %s, %s, %s): got x = %s, want %s", x, y, a, b, b2, x)
+	}
+	if y != nil && a2.Cmp(y) != 0 {
+		t.Errorf("aliased x = b, y = a GCD(%s, %s, %s, %s): got y = %s, want %s", x, y, a, b, a2, y)
 	}
 }
 
@@ -783,6 +856,10 @@ func TestGcd(t *testing.T) {
 	}
 
 	if err := quick.Check(checkLehmerGcd, nil); err != nil {
+		t.Error(err)
+	}
+
+	if err := quick.Check(checkLehmerExtGcd, nil); err != nil {
 		t.Error(err)
 	}
 }
@@ -1318,7 +1395,7 @@ func BenchmarkModSqrt225_Tonelli(b *testing.B) {
 	}
 }
 
-func BenchmarkModSqrt224_3Mod4(b *testing.B) {
+func BenchmarkModSqrt225_3Mod4(b *testing.B) {
 	p := tri(225)
 	x := new(Int).SetUint64(2)
 	for i := 0; i < b.N; i++ {
@@ -1327,27 +1404,25 @@ func BenchmarkModSqrt224_3Mod4(b *testing.B) {
 	}
 }
 
-func BenchmarkModSqrt5430_Tonelli(b *testing.B) {
-	if isRaceBuilder {
-		b.Skip("skipping on race builder")
-	}
-	p := tri(5430)
-	x := new(Int).SetUint64(2)
+func BenchmarkModSqrt231_Tonelli(b *testing.B) {
+	p := tri(231)
+	p.Sub(p, intOne)
+	p.Sub(p, intOne) // tri(231) - 2 is a prime == 5 mod 8
+	x := new(Int).SetUint64(7)
 	for i := 0; i < b.N; i++ {
-		x.SetUint64(2)
+		x.SetUint64(7)
 		x.modSqrtTonelliShanks(x, p)
 	}
 }
 
-func BenchmarkModSqrt5430_3Mod4(b *testing.B) {
-	if isRaceBuilder {
-		b.Skip("skipping on race builder")
-	}
-	p := tri(5430)
-	x := new(Int).SetUint64(2)
+func BenchmarkModSqrt231_5Mod8(b *testing.B) {
+	p := tri(231)
+	p.Sub(p, intOne)
+	p.Sub(p, intOne) // tri(231) - 2 is a prime == 5 mod 8
+	x := new(Int).SetUint64(7)
 	for i := 0; i < b.N; i++ {
-		x.SetUint64(2)
-		x.modSqrt3Mod4Prime(x, p)
+		x.SetUint64(7)
+		x.modSqrt5Mod8Prime(x, p)
 	}
 }
 
@@ -1684,6 +1759,32 @@ func BenchmarkIntSqr(b *testing.B) {
 		}
 		b.Run(fmt.Sprintf("%d", n), func(b *testing.B) {
 			benchmarkIntSqr(b, n)
+		})
+	}
+}
+
+func benchmarkDiv(b *testing.B, aSize, bSize int) {
+	var r = rand.New(rand.NewSource(1234))
+	aa := randInt(r, uint(aSize))
+	bb := randInt(r, uint(bSize))
+	if aa.Cmp(bb) < 0 {
+		aa, bb = bb, aa
+	}
+	x := new(Int)
+	y := new(Int)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		x.DivMod(aa, bb, y)
+	}
+}
+
+func BenchmarkDiv(b *testing.B) {
+	min, max, step := 10, 100000, 10
+	for i := min; i <= max; i *= step {
+		j := 2 * i
+		b.Run(fmt.Sprintf("%d/%d", j, i), func(b *testing.B) {
+			benchmarkDiv(b, j, i)
 		})
 	}
 }

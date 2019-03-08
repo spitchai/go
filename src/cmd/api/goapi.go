@@ -8,6 +8,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -153,6 +154,7 @@ func main() {
 	var featureCtx = make(map[string]map[string]bool) // feature -> context name -> true
 	for _, context := range contexts {
 		w := NewWalker(context, filepath.Join(build.Default.GOROOT, "src"))
+		w.loadImports(pkgNames, w.context)
 
 		for _, name := range pkgNames {
 			// Vendored packages do not contribute to our
@@ -169,7 +171,13 @@ func main() {
 					// w.Import(name) will return nil
 					continue
 				}
-				pkg, _ := w.Import(name)
+				pkg, err := w.Import(name)
+				if _, nogo := err.(*build.NoGoError); nogo {
+					continue
+				}
+				if err != nil {
+					log.Fatalf("Import(%q): %v", name, err)
+				}
 				w.export(pkg)
 			}
 		}
@@ -343,12 +351,14 @@ func fileFeatures(filename string) []string {
 var fset = token.NewFileSet()
 
 type Walker struct {
-	context  *build.Context
-	root     string
-	scope    []string
-	current  *types.Package
-	features map[string]bool           // set
-	imported map[string]*types.Package // packages already imported
+	context   *build.Context
+	root      string
+	scope     []string
+	current   *types.Package
+	features  map[string]bool              // set
+	imported  map[string]*types.Package    // packages already imported
+	importMap map[string]map[string]string // importer dir -> import path -> canonical path
+	importDir map[string]string            // canonical import path -> dir
 }
 
 func NewWalker(context *build.Context, root string) *Walker {
@@ -385,9 +395,7 @@ func (w *Walker) parseFile(dir, file string) (*ast.File, error) {
 	return f, nil
 }
 
-// The package cache doesn't operate correctly in rare (so far artificial)
-// circumstances (issue 8425). Disable before debugging non-obvious errors
-// from the type-checker.
+// Disable before debugging non-obvious errors from the type-checker.
 const usePkgCache = true
 
 var (
@@ -398,7 +406,7 @@ var (
 // tagKey returns the tag-based key to use in the pkgCache.
 // It is a comma-separated string; the first part is dir, the rest tags.
 // The satisfied tags are derived from context but only those that
-// matter (the ones listed in the tags argument) are used.
+// matter (the ones listed in the tags argument plus GOOS and GOARCH) are used.
 // The tags list, which came from go/build's Package.AllTags,
 // is known to be sorted.
 func tagKey(dir string, context *build.Context, tags []string) string {
@@ -414,12 +422,74 @@ func tagKey(dir string, context *build.Context, tags []string) string {
 	}
 	// TODO: ReleaseTags (need to load default)
 	key := dir
+
+	// explicit on GOOS and GOARCH as global cache will use "all" cached packages for
+	// an indirect imported package. See https://github.com/golang/go/issues/21181
+	// for more detail.
+	tags = append(tags, context.GOOS, context.GOARCH)
+	sort.Strings(tags)
+
 	for _, tag := range tags {
 		if ctags[tag] {
 			key += "," + tag
+			ctags[tag] = false
 		}
 	}
 	return key
+}
+
+func (w *Walker) loadImports(paths []string, context *build.Context) {
+	if context == nil {
+		context = &build.Default
+	}
+
+	var (
+		tags       = context.BuildTags
+		cgoEnabled = "0"
+	)
+	if context.CgoEnabled {
+		tags = append(tags[:len(tags):len(tags)], "cgo")
+		cgoEnabled = "1"
+	}
+
+	// TODO(golang.org/issue/29666): Request only the fields that we need.
+	cmd := exec.Command(goCmd(), "list", "-e", "-deps", "-json")
+	if len(tags) > 0 {
+		cmd.Args = append(cmd.Args, "-tags", strings.Join(tags, " "))
+	}
+	cmd.Args = append(cmd.Args, paths...)
+
+	cmd.Env = append(os.Environ(),
+		"GOOS="+context.GOOS,
+		"GOARCH="+context.GOARCH,
+		"CGO_ENABLED="+cgoEnabled,
+	)
+
+	stdout := new(bytes.Buffer)
+	cmd.Stdout = stdout
+	cmd.Stderr = new(strings.Builder)
+	err := cmd.Run()
+	if err != nil {
+		log.Fatalf("%s failed: %v\n%s", strings.Join(cmd.Args, " "), err, cmd.Stderr)
+	}
+
+	w.importDir = make(map[string]string)
+	w.importMap = make(map[string]map[string]string)
+	dec := json.NewDecoder(stdout)
+	for {
+		var pkg struct {
+			ImportPath, Dir string
+			ImportMap       map[string]string
+		}
+		if err := dec.Decode(&pkg); err == io.EOF {
+			break
+		} else if err != nil {
+			log.Fatalf("%s: invalid output: %v", strings.Join(cmd.Args, " "), err)
+		}
+
+		w.importDir[pkg.ImportPath] = pkg.Dir
+		w.importMap[pkg.Dir] = pkg.ImportMap
+	}
 }
 
 // Importing is a sentinel taking the place in Walker.imported
@@ -427,6 +497,15 @@ func tagKey(dir string, context *build.Context, tags []string) string {
 var importing types.Package
 
 func (w *Walker) Import(name string) (*types.Package, error) {
+	return w.ImportFrom(name, "", 0)
+}
+
+func (w *Walker) ImportFrom(fromPath, fromDir string, mode types.ImportMode) (*types.Package, error) {
+	name := fromPath
+	if canonical, ok := w.importMap[fromDir][fromPath]; ok {
+		name = canonical
+	}
+
 	pkg := w.imported[name]
 	if pkg != nil {
 		if pkg == &importing {
@@ -436,13 +515,11 @@ func (w *Walker) Import(name string) (*types.Package, error) {
 	}
 	w.imported[name] = &importing
 
-	root := w.root
-	if strings.HasPrefix(name, "golang_org/x/") {
-		root = filepath.Join(root, "vendor")
-	}
-
 	// Determine package files.
-	dir := filepath.Join(root, filepath.FromSlash(name))
+	dir := w.importDir[name]
+	if dir == "" {
+		dir = filepath.Join(w.root, filepath.FromSlash(name))
+	}
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		log.Fatalf("no source in tree for import %q: %v", name, err)
 	}
@@ -469,7 +546,7 @@ func (w *Walker) Import(name string) (*types.Package, error) {
 	info, err := context.ImportDir(dir, 0)
 	if err != nil {
 		if _, nogo := err.(*build.NoGoError); nogo {
-			return nil, nil
+			return nil, err
 		}
 		log.Fatalf("pkg %q, dir %q: ScanDir: %v", name, dir, err)
 	}

@@ -123,6 +123,10 @@ func (enc *Encoding) Encode(dst, src []byte) {
 	if len(src) == 0 {
 		return
 	}
+	// enc is a pointer receiver, so the use of enc.encode within the hot
+	// loop below means a nil check at every operation. Lift that nil check
+	// outside of the loop to speed up the encoder.
+	_ = enc.encode
 
 	di, si := 0, 0
 	n := (len(src) / 3) * 3
@@ -270,7 +274,7 @@ func (e CorruptInputError) Error() string {
 	return "illegal base64 data at input byte " + strconv.FormatInt(int64(e), 10)
 }
 
-// decodeQuantum decodes up to 4 base64 bytes. It takes for parameters
+// decodeQuantum decodes up to 4 base64 bytes. The received parameters are
 // the destination buffer dst, the source buffer src and an index in the
 // source buffer si.
 // It returns the number of bytes read from src, the number of bytes written
@@ -278,7 +282,7 @@ func (e CorruptInputError) Error() string {
 func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err error) {
 	// Decode quantum using the base64 alphabet
 	var dbuf [4]byte
-	dinc, dlen := 3, 4
+	dlen := 4
 
 	for j := 0; j < len(dbuf); j++ {
 		if len(src) == si {
@@ -288,7 +292,7 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err err
 			case j == 1, enc.padChar != NoPadding:
 				return si, 0, CorruptInputError(si - j)
 			}
-			dinc, dlen = j-1, j
+			dlen = j
 			break
 		}
 		in := src[si]
@@ -340,7 +344,7 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err err
 			// trailing garbage
 			err = CorruptInputError(si)
 		}
-		dinc, dlen = 3, j
+		dlen = j
 		break
 	}
 
@@ -365,7 +369,6 @@ func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err err
 			return si, 0, CorruptInputError(si - 2)
 		}
 	}
-	dst = dst[dinc:]
 
 	return si, dlen - 1, err
 }
@@ -465,10 +468,9 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 	}
 
 	si := 0
-	ilen := len(src)
-	olen := len(dst)
-	for strconv.IntSize >= 64 && ilen-si >= 8 && olen-n >= 8 {
-		if ok := enc.decode64(dst[n:], src[si:]); ok {
+	for strconv.IntSize >= 64 && len(src)-si >= 8 && len(dst)-n >= 8 {
+		if dn, ok := enc.decode64(src[si:]); ok {
+			binary.BigEndian.PutUint64(dst[n:], dn)
 			n += 6
 			si += 8
 		} else {
@@ -481,8 +483,9 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 		}
 	}
 
-	for ilen-si >= 4 && olen-n >= 4 {
-		if ok := enc.decode32(dst[n:], src[si:]); ok {
+	for len(src)-si >= 4 && len(dst)-n >= 4 {
+		if dn, ok := enc.decode32(src[si:]); ok {
+			binary.BigEndian.PutUint32(dst[n:], dn)
 			n += 3
 			si += 4
 		} else {
@@ -506,72 +509,70 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 	return n, err
 }
 
-// decode32 tries to decode 4 base64 char into 3 bytes.
-// len(dst) and len(src) must both be >= 4.
-// Returns true if decode succeeded.
-func (enc *Encoding) decode32(dst, src []byte) bool {
-	var dn, n uint32
+// decode32 tries to decode 4 base64 characters into 3 bytes, and returns those
+// bytes. len(src) must be >= 4.
+// Returns (0, false) if decoding failed.
+func (enc *Encoding) decode32(src []byte) (dn uint32, ok bool) {
+	var n uint32
+	_ = src[3]
 	if n = uint32(enc.decodeMap[src[0]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 26
 	if n = uint32(enc.decodeMap[src[1]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 20
 	if n = uint32(enc.decodeMap[src[2]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 14
 	if n = uint32(enc.decodeMap[src[3]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 8
-
-	binary.BigEndian.PutUint32(dst, dn)
-	return true
+	return dn, true
 }
 
-// decode64 tries to decode 8 base64 char into 6 bytes.
-// len(dst) and len(src) must both be >= 8.
-// Returns true if decode succeeded.
-func (enc *Encoding) decode64(dst, src []byte) bool {
-	var dn, n uint64
+// decode64 tries to decode 8 base64 characters into 6 bytes, and returns those
+// bytes. len(src) must be >= 8.
+// Returns (0, false) if decoding failed.
+func (enc *Encoding) decode64(src []byte) (dn uint64, ok bool) {
+	var n uint64
+	_ = src[7]
 	if n = uint64(enc.decodeMap[src[0]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 58
 	if n = uint64(enc.decodeMap[src[1]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 52
 	if n = uint64(enc.decodeMap[src[2]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 46
 	if n = uint64(enc.decodeMap[src[3]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 40
 	if n = uint64(enc.decodeMap[src[4]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 34
 	if n = uint64(enc.decodeMap[src[5]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 28
 	if n = uint64(enc.decodeMap[src[6]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 22
 	if n = uint64(enc.decodeMap[src[7]]); n == 0xff {
-		return false
+		return 0, false
 	}
 	dn |= n << 16
-
-	binary.BigEndian.PutUint64(dst, dn)
-	return true
+	return dn, true
 }
 
 type newlineFilteringReader struct {

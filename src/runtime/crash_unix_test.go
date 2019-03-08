@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux netbsd openbsd solaris
+// +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
 
 package runtime_test
 
@@ -63,7 +63,7 @@ func TestCrashDumpsAllThreads(t *testing.T) {
 		t.Fatalf("failed to create Go file: %v", err)
 	}
 
-	cmd := exec.Command(testenv.GoToolPath(t), "build", "-o", "a.exe")
+	cmd := exec.Command(testenv.GoToolPath(t), "build", "-o", "a.exe", "main.go")
 	cmd.Dir = dir
 	out, err := testenv.CleanCmdEnv(cmd).CombinedOutput()
 	if err != nil {

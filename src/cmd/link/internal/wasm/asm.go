@@ -11,6 +11,7 @@ import (
 	"cmd/link/internal/sym"
 	"io"
 	"regexp"
+	"runtime"
 )
 
 const (
@@ -53,7 +54,11 @@ type wasmFuncType struct {
 }
 
 var wasmFuncTypes = map[string]*wasmFuncType{
-	"_rt0_wasm_js":           &wasmFuncType{Params: []byte{I32, I32}},                                 // argc, argv
+	"_rt0_wasm_js":           &wasmFuncType{Params: []byte{}},                                         //
+	"wasm_export_run":        &wasmFuncType{Params: []byte{I32, I32}},                                 // argc, argv
+	"wasm_export_resume":     &wasmFuncType{Params: []byte{}},                                         //
+	"wasm_export_getsp":      &wasmFuncType{Results: []byte{I32}},                                     // sp
+	"wasm_pc_f_loop":         &wasmFuncType{Params: []byte{}},                                         //
 	"runtime.wasmMove":       &wasmFuncType{Params: []byte{I32, I32, I32}},                            // dst, src, len
 	"runtime.wasmZero":       &wasmFuncType{Params: []byte{I32, I32}},                                 // ptr, len
 	"runtime.wasmDiv":        &wasmFuncType{Params: []byte{I64, I64}, Results: []byte{I64}},           // x, y -> x/y
@@ -88,7 +93,7 @@ func assignAddress(ctxt *ld.Link, sect *sym.Section, n int, s *sym.Symbol, va ui
 }
 
 // asmb writes the final WebAssembly module binary.
-// Spec: http://webassembly.github.io/spec/core/binary/modules.html
+// Spec: https://webassembly.github.io/spec/core/binary/modules.html
 func asmb(ctxt *ld.Link) {
 	if ctxt.Debugvlog != 0 {
 		ctxt.Logf("%5.2f asmb\n", ld.Cputime())
@@ -122,6 +127,7 @@ func asmb(ctxt *ld.Link) {
 	}
 
 	// collect functions with WebAssembly body
+	var buildid []byte
 	fns := make([]*wasmFunc, len(ctxt.Textp))
 	for i, fn := range ctxt.Textp {
 		wfn := new(bytes.Buffer)
@@ -129,7 +135,7 @@ func asmb(ctxt *ld.Link) {
 			writeUleb128(wfn, 0) // number of sets of locals
 			writeI32Const(wfn, 0)
 			wfn.WriteByte(0x0b) // end
-
+			buildid = fn.P
 		} else {
 			// Relocations have variable length, handle them here.
 			off := int32(0)
@@ -160,24 +166,27 @@ func asmb(ctxt *ld.Link) {
 		fns[i] = &wasmFunc{Name: name, Type: typ, Code: wfn.Bytes()}
 	}
 
-	// look up program entry point
-	rt0 := uint32(len(hostImports)) + uint32(ctxt.Syms.ROLookup("_rt0_wasm_js", 0).Value>>16) - funcValueOffset
-
 	ctxt.Out.Write([]byte{0x00, 0x61, 0x73, 0x6d}) // magic
 	ctxt.Out.Write([]byte{0x01, 0x00, 0x00, 0x00}) // version
 
+	// Add any buildid early in the binary:
+	if len(buildid) != 0 {
+		writeBuildID(ctxt, buildid)
+	}
+
+	writeGoVersion(ctxt)
 	writeTypeSec(ctxt, types)
 	writeImportSec(ctxt, hostImports)
 	writeFunctionSec(ctxt, fns)
 	writeTableSec(ctxt, fns)
 	writeMemorySec(ctxt)
 	writeGlobalSec(ctxt)
-	writeExportSec(ctxt, rt0)
+	writeExportSec(ctxt, len(hostImports))
 	writeElementSec(ctxt, uint64(len(hostImports)), uint64(len(fns)))
 	writeCodeSec(ctxt, fns)
 	writeDataSec(ctxt)
 	if !*ld.FlagS {
-		writeNameSec(ctxt, append(hostImports, fns...))
+		writeNameSec(ctxt, len(hostImports), fns)
 	}
 
 	ctxt.Out.Flush()
@@ -205,6 +214,20 @@ func writeSecSize(ctxt *ld.Link, sizeOffset int64) {
 	ctxt.Out.SeekSet(sizeOffset)
 	writeUleb128FixedLength(ctxt.Out, uint64(endOffset-sizeOffset-5), 5)
 	ctxt.Out.SeekSet(endOffset)
+}
+
+func writeBuildID(ctxt *ld.Link, buildid []byte) {
+	sizeOffset := writeSecHeader(ctxt, sectionCustom)
+	writeName(ctxt.Out, "go.buildid")
+	ctxt.Out.Write(buildid)
+	writeSecSize(ctxt, sizeOffset)
+}
+
+func writeGoVersion(ctxt *ld.Link) {
+	sizeOffset := writeSecHeader(ctxt, sectionCustom)
+	writeName(ctxt.Out, "go.version")
+	ctxt.Out.Write([]byte(runtime.Version()))
+	writeSecSize(ctxt, sizeOffset)
 }
 
 // writeTypeSec writes the section that declares all function types
@@ -304,6 +327,7 @@ func writeGlobalSec(ctxt *ld.Link) {
 		I64, // 6: RET1
 		I64, // 7: RET2
 		I64, // 8: RET3
+		I32, // 9: PAUSE
 	}
 
 	writeUleb128(ctxt.Out, uint64(len(globalRegs))) // number of globals
@@ -325,15 +349,18 @@ func writeGlobalSec(ctxt *ld.Link) {
 
 // writeExportSec writes the section that declares exports.
 // Exports can be accessed by the WebAssembly host, usually JavaScript.
-// Currently _rt0_wasm_js (program entry point) and the linear memory get exported.
-func writeExportSec(ctxt *ld.Link, rt0 uint32) {
+// The wasm_export_* functions and the linear memory get exported.
+func writeExportSec(ctxt *ld.Link, lenHostImports int) {
 	sizeOffset := writeSecHeader(ctxt, sectionExport)
 
-	writeUleb128(ctxt.Out, 2) // number of exports
+	writeUleb128(ctxt.Out, 4) // number of exports
 
-	writeName(ctxt.Out, "run")          // inst.exports.run in wasm_exec.js
-	ctxt.Out.WriteByte(0x00)            // func export
-	writeUleb128(ctxt.Out, uint64(rt0)) // funcidx
+	for _, name := range []string{"run", "resume", "getsp"} {
+		idx := uint32(lenHostImports) + uint32(ctxt.Syms.ROLookup("wasm_export_"+name, 0).Value>>16) - funcValueOffset
+		writeName(ctxt.Out, name)           // inst.exports.run/resume/getsp in wasm_exec.js
+		ctxt.Out.WriteByte(0x00)            // func export
+		writeUleb128(ctxt.Out, uint64(idx)) // funcidx
+	}
 
 	writeName(ctxt.Out, "mem") // inst.exports.mem in wasm_exec.js
 	ctxt.Out.WriteByte(0x02)   // mem export
@@ -408,14 +435,14 @@ var nameRegexp = regexp.MustCompile(`[^\w\.]`)
 // writeNameSec writes an optional section that assigns names to the functions declared by the "func" section.
 // The names are only used by WebAssembly stack traces, debuggers and decompilers.
 // TODO(neelance): add symbol table of DATA symbols
-func writeNameSec(ctxt *ld.Link, fns []*wasmFunc) {
+func writeNameSec(ctxt *ld.Link, firstFnIndex int, fns []*wasmFunc) {
 	sizeOffset := writeSecHeader(ctxt, sectionCustom)
 	writeName(ctxt.Out, "name")
 
 	sizeOffset2 := writeSecHeader(ctxt, 0x01) // function names
 	writeUleb128(ctxt.Out, uint64(len(fns)))
 	for i, fn := range fns {
-		writeUleb128(ctxt.Out, uint64(i))
+		writeUleb128(ctxt.Out, uint64(firstFnIndex+i))
 		writeName(ctxt.Out, fn.Name)
 	}
 	writeSecSize(ctxt, sizeOffset2)

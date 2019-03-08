@@ -114,7 +114,7 @@ type posetNode struct {
 // given that non-equality is not transitive, the only effect is that a later call
 // to SetEqual for the same values will fail. NonEqual checks whether it is known that
 // the nodes are different, either because SetNonEqual was called before, or because
-// we know that that they are strictly ordered.
+// we know that they are strictly ordered.
 //
 // It is implemented as a forest of DAGs; in each DAG, if node A dominates B,
 // it means that A<B. Equality is represented by mapping two SSA values to the same
@@ -152,19 +152,22 @@ type poset struct {
 	undo      []posetUndo   // undo chain
 }
 
-func newPoset(unsigned bool) *poset {
-	var flags uint8
-	if unsigned {
-		flags |= posetFlagUnsigned
-	}
+func newPoset() *poset {
 	return &poset{
-		flags:     flags,
 		values:    make(map[ID]uint32),
 		constants: make([]*Value, 0, 8),
 		nodes:     make([]posetNode, 1, 16),
 		roots:     make([]uint32, 0, 4),
 		noneq:     make(map[ID]bitset),
 		undo:      make([]posetUndo, 0, 4),
+	}
+}
+
+func (po *poset) SetUnsigned(uns bool) {
+	if uns {
+		po.flags |= posetFlagUnsigned
+	} else {
+		po.flags &^= posetFlagUnsigned
 	}
 }
 
@@ -679,12 +682,23 @@ func (po *poset) CheckIntegrity() (err error) {
 // It can be used for debugging purposes, as a poset is supposed to
 // be empty after it's fully rolled back through Undo.
 func (po *poset) CheckEmpty() error {
-	// Check that the poset is completely empty
+	if len(po.nodes) != 1 {
+		return fmt.Errorf("non-empty nodes list: %v", po.nodes)
+	}
 	if len(po.values) != 0 {
 		return fmt.Errorf("non-empty value map: %v", po.values)
 	}
 	if len(po.roots) != 0 {
 		return fmt.Errorf("non-empty root list: %v", po.roots)
+	}
+	if len(po.constants) != 0 {
+		return fmt.Errorf("non-empty constants: %v", po.constants)
+	}
+	if len(po.undo) != 0 {
+		return fmt.Errorf("non-empty undo list: %v", po.undo)
+	}
+	if po.lastidx != 0 {
+		return fmt.Errorf("lastidx index is not zero: %v", po.lastidx)
 	}
 	for _, bs := range po.noneq {
 		for _, x := range bs {
@@ -692,14 +706,6 @@ func (po *poset) CheckEmpty() error {
 				return fmt.Errorf("non-empty noneq map")
 			}
 		}
-	}
-	for idx, n := range po.nodes {
-		if n.l|n.r != 0 {
-			return fmt.Errorf("non-empty node %v->[%d,%d]", idx, n.l.Target(), n.r.Target())
-		}
-	}
-	if len(po.constants) != 0 {
-		return fmt.Errorf("non-empty constant")
 	}
 	return nil
 }
@@ -775,7 +781,7 @@ func (po *poset) DotDump(fn string, title string) error {
 	return nil
 }
 
-// Ordered returns true if n1<n2. It returns false either when it is
+// Ordered reports whether n1<n2. It returns false either when it is
 // certain that n1<n2 is false, or if there is not enough information
 // to tell.
 // Complexity is O(n).
@@ -793,7 +799,7 @@ func (po *poset) Ordered(n1, n2 *Value) bool {
 	return i1 != i2 && po.dominates(i1, i2, true)
 }
 
-// Ordered returns true if n1<=n2. It returns false either when it is
+// Ordered reports whether n1<=n2. It returns false either when it is
 // certain that n1<=n2 is false, or if there is not enough information
 // to tell.
 // Complexity is O(n).
@@ -812,7 +818,7 @@ func (po *poset) OrderedOrEqual(n1, n2 *Value) bool {
 		(po.dominates(i2, i1, false) && !po.dominates(i2, i1, true))
 }
 
-// Equal returns true if n1==n2. It returns false either when it is
+// Equal reports whether n1==n2. It returns false either when it is
 // certain that n1==n2 is false, or if there is not enough information
 // to tell.
 // Complexity is O(1).
@@ -826,7 +832,7 @@ func (po *poset) Equal(n1, n2 *Value) bool {
 	return f1 && f2 && i1 == i2
 }
 
-// NonEqual returns true if n1!=n2. It returns false either when it is
+// NonEqual reports whether n1!=n2. It returns false either when it is
 // certain that n1!=n2 is false, or if there is not enough information
 // to tell.
 // Complexity is O(n) (because it internally calls Ordered to see if we
@@ -1123,6 +1129,9 @@ func (po *poset) Undo() {
 			po.noneq[pass.ID].Clear(pass.idx)
 
 		case undoNewNode:
+			if pass.idx != po.lastidx {
+				panic("invalid newnode index")
+			}
 			if pass.ID != 0 {
 				if po.values[pass.ID] != pass.idx {
 					panic("invalid newnode undo pass")
@@ -1131,6 +1140,8 @@ func (po *poset) Undo() {
 			}
 			po.setchl(pass.idx, 0)
 			po.setchr(pass.idx, 0)
+			po.nodes = po.nodes[:pass.idx]
+			po.lastidx--
 
 			// If it was the last inserted constant, remove it
 			nc := len(po.constants)

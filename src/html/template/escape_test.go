@@ -35,7 +35,8 @@ func TestEscape(t *testing.T) {
 		A, E    []string
 		B, M    json.Marshaler
 		N       int
-		Z       *int
+		U       interface{} // untyped nil
+		Z       *int        // typed nil
 		W       HTML
 	}{
 		F: false,
@@ -48,6 +49,7 @@ func TestEscape(t *testing.T) {
 		N: 42,
 		B: &badMarshaler{},
 		M: &goodMarshaler{},
+		U: nil,
 		Z: nil,
 		W: HTML(`&iexcl;<b class="foo">Hello</b>, <textarea>O'World</textarea>!`),
 	}
@@ -112,6 +114,16 @@ func TestEscape(t *testing.T) {
 			"nonStringValue",
 			"{{.T}}",
 			"true",
+		},
+		{
+			"untypedNilValue",
+			"{{.U}}",
+			"",
+		},
+		{
+			"typedNilValue",
+			"{{.Z}}",
+			"&lt;nil&gt;",
 		},
 		{
 			"constant",
@@ -199,8 +211,13 @@ func TestEscape(t *testing.T) {
 			`<button onclick='alert( true )'>`,
 		},
 		{
-			"jsNilValue",
+			"jsNilValueTyped",
 			"<button onclick='alert(typeof{{.Z}})'>",
+			`<button onclick='alert(typeof null )'>`,
+		},
+		{
+			"jsNilValueUntyped",
+			"<button onclick='alert(typeof{{.U}})'>",
 			`<button onclick='alert(typeof null )'>`,
 		},
 		{
@@ -1852,8 +1869,7 @@ func TestErrorOnUndefined(t *testing.T) {
 	err := tmpl.Execute(nil, nil)
 	if err == nil {
 		t.Error("expected error")
-	}
-	if !strings.Contains(err.Error(), "incomplete") {
+	} else if !strings.Contains(err.Error(), "incomplete") {
 		t.Errorf("expected error about incomplete template; got %s", err)
 	}
 }

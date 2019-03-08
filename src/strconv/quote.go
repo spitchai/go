@@ -6,9 +6,15 @@
 
 package strconv
 
-import "unicode/utf8"
+import (
+	"internal/bytealg"
+	"unicode/utf8"
+)
 
-const lowerhex = "0123456789abcdef"
+const (
+	lowerhex = "0123456789abcdef"
+	upperhex = "0123456789ABCDEF"
+)
 
 func quoteWith(s string, quote byte, ASCIIonly, graphicOnly bool) string {
 	return string(appendQuotedWith(make([]byte, 0, 3*len(s)/2), s, quote, ASCIIonly, graphicOnly))
@@ -237,6 +243,10 @@ func unhex(b byte) (v rune, ok bool) {
 // If set to zero, it does not permit either escape and allows both quote characters to appear unescaped.
 func UnquoteChar(s string, quote byte) (value rune, multibyte bool, tail string, err error) {
 	// easy cases
+	if len(s) == 0 {
+		err = ErrSyntax
+		return
+	}
 	switch c := s[0]; {
 	case c == quote && (quote == '\'' || quote == '"'):
 		err = ErrSyntax
@@ -420,12 +430,7 @@ func Unquote(s string) (string, error) {
 
 // contains reports whether the string contains the byte c.
 func contains(s string, c byte) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return true
-		}
-	}
-	return false
+	return bytealg.IndexByteString(s, c) != -1
 }
 
 // bsearch16 returns the smallest i such that a[i] >= x.

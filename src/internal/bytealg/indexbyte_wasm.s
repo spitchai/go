@@ -6,19 +6,19 @@
 #include "textflag.h"
 
 TEXT ·IndexByte(SB), NOSPLIT, $0-40
-	I64Load s+0(FP)
+	I64Load b_base+0(FP)
 	I32WrapI64
 	I32Load8U c+24(FP)
-	I64Load s_len+8(FP)
+	I64Load b_len+8(FP)
 	I32WrapI64
 	Call memchr<>(SB)
-	I64ExtendSI32
+	I64ExtendI32S
 	Set R0
 
 	Get SP
 	I64Const $-1
 	Get R0
-	I64Load s+0(FP)
+	I64Load b_base+0(FP)
 	I64Sub
 	Get R0
 	I64Eqz $0
@@ -29,67 +29,24 @@ TEXT ·IndexByte(SB), NOSPLIT, $0-40
 
 TEXT ·IndexByteString(SB), NOSPLIT, $0-32
 	Get SP
-	I64Load s+0(FP)
+	I64Load s_base+0(FP)
 	I32WrapI64
 	I32Load8U c+16(FP)
 	I64Load s_len+8(FP)
 	I32WrapI64
 	Call memchr<>(SB)
-	I64ExtendSI32
+	I64ExtendI32S
 	Set R0
 
 	I64Const $-1
 	Get R0
-	I64Load s+0(FP)
+	I64Load s_base+0(FP)
 	I64Sub
 	Get R0
 	I64Eqz $0
 	Select
 	I64Store ret+24(FP)
 
-	RET
-
-TEXT bytes·IndexByte(SB), NOSPLIT, $0-40
-	Get SP
-	I64Load s+0(FP)
-	I32WrapI64
-	I32Load8U c+24(FP)
-	I64Load s_len+8(FP)
-	I32WrapI64
-	Call memchr<>(SB)
-	I64ExtendSI32
-	Set R0
-
-	I64Const $-1
-	Get R0
-	I64Load s+0(FP)
-	I64Sub
-	Get R0
-	I64Eqz $0
-	Select
-	I64Store ret+32(FP)
-
-	RET
-
-TEXT strings·IndexByte(SB), NOSPLIT, $0-32
-	Get SP
-	I64Load s+0(FP)
-	I32WrapI64
-	I32Load8U c+16(FP)
-	I64Load s_len+8(FP)
-	I32WrapI64
-	Call memchr<>(SB)
-	I64ExtendSI32
-	Set R0
-
-	I64Const $-1
-	Get R0
-	I64Load s+0(FP)
-	I64Sub
-	Get R0
-	I64Eqz $0
-	Select
-	I64Store ret+24(FP)
 	RET
 
 // compiled with emscripten

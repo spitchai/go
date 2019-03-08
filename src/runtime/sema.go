@@ -15,13 +15,13 @@
 // even if, due to races, the wakeup happens before the sleep.
 //
 // See Mullender and Cox, ``Semaphores in Plan 9,''
-// http://swtch.com/semaphore.pdf
+// https://swtch.com/semaphore.pdf
 
 package runtime
 
 import (
+	"internal/cpu"
 	"runtime/internal/atomic"
-	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -48,7 +48,7 @@ const semTabSize = 251
 
 var semtable [semTabSize]struct {
 	root semaRoot
-	pad  [sys.CacheLineSize - unsafe.Sizeof(semaRoot{})]byte
+	pad  [cpu.CacheLinePadSize - unsafe.Sizeof(semaRoot{})]byte
 }
 
 //go:linkname sync_runtime_Semacquire sync.runtime_Semacquire
@@ -62,8 +62,8 @@ func poll_runtime_Semacquire(addr *uint32) {
 }
 
 //go:linkname sync_runtime_Semrelease sync.runtime_Semrelease
-func sync_runtime_Semrelease(addr *uint32, handoff bool) {
-	semrelease1(addr, handoff)
+func sync_runtime_Semrelease(addr *uint32, handoff bool, skipframes int) {
+	semrelease1(addr, handoff, skipframes)
 }
 
 //go:linkname sync_runtime_SemacquireMutex sync.runtime_SemacquireMutex
@@ -153,10 +153,10 @@ func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags) {
 }
 
 func semrelease(addr *uint32) {
-	semrelease1(addr, false)
+	semrelease1(addr, false, 0)
 }
 
-func semrelease1(addr *uint32, handoff bool) {
+func semrelease1(addr *uint32, handoff bool, skipframes int) {
 	root := semroot(addr)
 	atomic.Xadd(addr, 1)
 
@@ -183,7 +183,7 @@ func semrelease1(addr *uint32, handoff bool) {
 	if s != nil { // May be slow, so unlock first
 		acquiretime := s.acquiretime
 		if acquiretime != 0 {
-			mutexevent(t0-acquiretime, 3)
+			mutexevent(t0-acquiretime, 3+skipframes)
 		}
 		if s.ticket != 0 {
 			throw("corrupted semaphore ticket")
@@ -191,7 +191,7 @@ func semrelease1(addr *uint32, handoff bool) {
 		if handoff && cansemacquire(addr) {
 			s.ticket = 1
 		}
-		readyWithTime(s, 5)
+		readyWithTime(s, 5+skipframes)
 	}
 }
 
@@ -274,7 +274,7 @@ func (root *semaRoot) queue(addr *uint32, s *sudog, lifo bool) {
 	// addresses, it is kept balanced on average by maintaining a heap ordering
 	// on the ticket: s.ticket <= both s.prev.ticket and s.next.ticket.
 	// https://en.wikipedia.org/wiki/Treap
-	// http://faculty.washington.edu/aragon/pubs/rst89.pdf
+	// https://faculty.washington.edu/aragon/pubs/rst89.pdf
 	//
 	// s.ticket compared with zero in couple of places, therefore set lowest bit.
 	// It will not affect treap's quality noticeably.

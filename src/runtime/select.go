@@ -110,7 +110,7 @@ func block() {
 //
 // selectgo returns the index of the chosen scase, which matches the
 // ordinal position of its respective select{recv,send,default} call.
-// Also, if the chosen scase was a receive operation, it returns whether
+// Also, if the chosen scase was a receive operation, it reports whether
 // a value was received.
 func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
 	if debugSelect {
@@ -191,14 +191,15 @@ func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
 		}
 		lockorder[j] = o
 	}
-	/*
+
+	if debugSelect {
 		for i := 0; i+1 < ncases; i++ {
 			if scases[lockorder[i]].c.sortkey() > scases[lockorder[i+1]].c.sortkey() {
 				print("i=", i, " x=", lockorder[i], " y=", lockorder[i+1], "\n")
 				throw("select: broken sort")
 			}
 		}
-	*/
+	}
 
 	// lock all the channels involved in the select
 	sellock(scases, lockorder)
@@ -244,7 +245,7 @@ loop:
 
 		case caseSend:
 			if raceenabled {
-				racereadpc(unsafe.Pointer(c), cas.pc, chansendpc)
+				racereadpc(c.raceaddr(), cas.pc, chansendpc)
 			}
 			if c.closed != 0 {
 				goto sclose
@@ -461,7 +462,7 @@ rclose:
 		typedmemclr(c.elemtype, cas.elem)
 	}
 	if raceenabled {
-		raceacquire(unsafe.Pointer(c))
+		raceacquire(c.raceaddr())
 	}
 	goto retc
 

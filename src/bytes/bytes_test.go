@@ -1362,6 +1362,12 @@ func TestReplace(t *testing.T) {
 		if cap(in) == cap(out) && &in[:1][0] == &out[:1][0] {
 			t.Errorf("Replace(%q, %q, %q, %d) didn't copy", tt.in, tt.old, tt.new, tt.n)
 		}
+		if tt.n == -1 {
+			out := ReplaceAll(in, []byte(tt.old), []byte(tt.new))
+			if s := string(out); s != tt.out {
+				t.Errorf("ReplaceAll(%q, %q, %q) = %q, want %q", tt.in, tt.old, tt.new, s, tt.out)
+			}
+		}
 	}
 }
 
@@ -1635,6 +1641,16 @@ func makeBenchInputHard() []byte {
 }
 
 var benchInputHard = makeBenchInputHard()
+
+func benchmarkLastIndexHard(b *testing.B, sep []byte) {
+	for i := 0; i < b.N; i++ {
+		LastIndex(benchInputHard, sep)
+	}
+}
+
+func BenchmarkLastIndexHard1(b *testing.B) { benchmarkLastIndexHard(b, []byte("<>")) }
+func BenchmarkLastIndexHard2(b *testing.B) { benchmarkLastIndexHard(b, []byte("</pre>")) }
+func BenchmarkLastIndexHard3(b *testing.B) { benchmarkLastIndexHard(b, []byte("<b>hello world</b>")) }
 
 func BenchmarkSplitEmptySeparator(b *testing.B) {
 	for i := 0; i < b.N; i++ {

@@ -5,10 +5,10 @@
 package get
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"internal/lazyregexp"
 	"internal/singleflight"
 	"log"
 	"net/url"
@@ -171,7 +171,7 @@ var vcsGit = &vcsCmd{
 
 // scpSyntaxRe matches the SCP-like addresses used by Git to access
 // repositories by SSH.
-var scpSyntaxRe = regexp.MustCompile(`^([a-zA-Z0-9_]+)@([a-zA-Z0-9._-]+):(.*)$`)
+var scpSyntaxRe = lazyregexp.New(`^([a-zA-Z0-9_]+)@([a-zA-Z0-9._-]+):(.*)$`)
 
 func gitRemoteRepo(vcsGit *vcsCmd, rootDir string) (remoteRepo string, err error) {
 	cmd := "config remote.origin.url"
@@ -428,19 +428,18 @@ func (v *vcsCmd) run1(dir string, cmdline string, keyval []string, verbose bool)
 		fmt.Printf("cd %s\n", dir)
 		fmt.Printf("%s %s\n", v.cmd, strings.Join(args, " "))
 	}
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err = cmd.Run()
-	out := buf.Bytes()
+	out, err := cmd.Output()
 	if err != nil {
 		if verbose || cfg.BuildV {
 			fmt.Fprintf(os.Stderr, "# cd %s; %s %s\n", dir, v.cmd, strings.Join(args, " "))
-			os.Stderr.Write(out)
+			if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+				os.Stderr.Write(ee.Stderr)
+			} else {
+				fmt.Fprintf(os.Stderr, err.Error())
+			}
 		}
-		return out, err
 	}
-	return out, nil
+	return out, err
 }
 
 // ping pings to determine scheme to use.
@@ -527,13 +526,11 @@ func (v *vcsCmd) tagSync(dir, tag string) error {
 // version control system and repository name.
 type vcsPath struct {
 	prefix string                              // prefix this description applies to
-	re     string                              // pattern for import path
+	regexp *lazyregexp.Regexp                  // compiled pattern for import path
 	repo   string                              // repository to use (expand with match of re)
 	vcs    string                              // version control system to use (expand with match of re)
 	check  func(match map[string]string) error // additional checks
 	ping   bool                                // ping for scheme to use to download repo
-
-	regexp *regexp.Regexp // cached compiled form of re
 }
 
 // vcsFromDir inspects dir and its parents to determine the
@@ -624,37 +621,39 @@ func checkNestedVCS(vcs *vcsCmd, dir, srcRoot string) error {
 	return nil
 }
 
-// repoRoot represents a version control system, a repo, and a root of
-// where to put it on disk.
-type repoRoot struct {
-	vcs *vcsCmd
+// RepoRoot describes the repository root for a tree of source code.
+type RepoRoot struct {
+	Repo     string // repository URL, including scheme
+	Root     string // import path corresponding to root of repo
+	IsCustom bool   // defined by served <meta> tags (as opposed to hard-coded pattern)
+	VCS      string // vcs type ("mod", "git", ...)
 
-	// repo is the repository URL, including scheme
-	repo string
-
-	// root is the import path corresponding to the root of the
-	// repository
-	root string
-
-	// isCustom is true for custom import paths (those defined by HTML meta tags)
-	isCustom bool
+	vcs *vcsCmd // internal: vcs command access
 }
 
-var httpPrefixRE = regexp.MustCompile(`^https?:`)
+func httpPrefix(s string) string {
+	for _, prefix := range [...]string{"http:", "https:"} {
+		if strings.HasPrefix(s, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
 
-// repoRootForImportPath analyzes importPath to determine the
+// ModuleMode specifies whether to prefer modules when looking up code sources.
+type ModuleMode int
+
+const (
+	IgnoreMod ModuleMode = iota
+	PreferMod
+)
+
+// RepoRootForImportPath analyzes importPath to determine the
 // version control system, and code repository to use.
-func repoRootForImportPath(importPath string, security web.SecurityMode) (*repoRoot, error) {
+func RepoRootForImportPath(importPath string, mod ModuleMode, security web.SecurityMode) (*RepoRoot, error) {
 	rr, err := repoRootFromVCSPaths(importPath, "", security, vcsPaths)
 	if err == errUnknownSite {
-		// If there are wildcards, look up the thing before the wildcard,
-		// hoping it applies to the wildcarded parts too.
-		// This makes 'go get rsc.io/pdf/...' work in a fresh GOPATH.
-		lookup := strings.TrimSuffix(importPath, "/...")
-		if i := strings.Index(lookup, "/.../"); i >= 0 {
-			lookup = lookup[:i]
-		}
-		rr, err = repoRootForImportDynamic(lookup, security)
+		rr, err = repoRootForImportDynamic(importPath, mod, security)
 		if err != nil {
 			err = fmt.Errorf("unrecognized import path %q (%v)", importPath, err)
 		}
@@ -667,7 +666,8 @@ func repoRootForImportPath(importPath string, security web.SecurityMode) (*repoR
 		}
 	}
 
-	if err == nil && strings.Contains(importPath, "...") && strings.Contains(rr.root, "...") {
+	// Should have been taken care of above, but make sure.
+	if err == nil && strings.Contains(importPath, "...") && strings.Contains(rr.Root, "...") {
 		// Do not allow wildcards in the repo root.
 		rr = nil
 		err = fmt.Errorf("cannot expand ... in %q", importPath)
@@ -680,13 +680,13 @@ var errUnknownSite = errors.New("dynamic lookup required to find mapping")
 // repoRootFromVCSPaths attempts to map importPath to a repoRoot
 // using the mappings defined in vcsPaths.
 // If scheme is non-empty, that scheme is forced.
-func repoRootFromVCSPaths(importPath, scheme string, security web.SecurityMode, vcsPaths []*vcsPath) (*repoRoot, error) {
+func repoRootFromVCSPaths(importPath, scheme string, security web.SecurityMode, vcsPaths []*vcsPath) (*RepoRoot, error) {
 	// A common error is to use https://packagepath because that's what
 	// hg and git require. Diagnose this helpfully.
-	if loc := httpPrefixRE.FindStringIndex(importPath); loc != nil {
+	if prefix := httpPrefix(importPath); prefix != "" {
 		// The importPath has been cleaned, so has only one slash. The pattern
 		// ignores the slashes; the error message puts them back on the RHS at least.
-		return nil, fmt.Errorf("%q not allowed in import path", importPath[loc[0]:loc[1]]+"//")
+		return nil, fmt.Errorf("%q not allowed in import path", prefix+"//")
 	}
 	for _, srv := range vcsPaths {
 		if !strings.HasPrefix(importPath, srv.prefix) {
@@ -733,28 +733,32 @@ func repoRootFromVCSPaths(importPath, scheme string, security web.SecurityMode, 
 					if security == web.Secure && !vcs.isSecureScheme(scheme) {
 						continue
 					}
-					if vcs.ping(scheme, match["repo"]) == nil {
+					if vcs.pingCmd != "" && vcs.ping(scheme, match["repo"]) == nil {
 						match["repo"] = scheme + "://" + match["repo"]
-						break
+						goto Found
 					}
 				}
+				// No scheme found. Fall back to the first one.
+				match["repo"] = vcs.scheme[0] + "://" + match["repo"]
+			Found:
 			}
 		}
-		rr := &repoRoot{
+		rr := &RepoRoot{
+			Repo: match["repo"],
+			Root: match["root"],
+			VCS:  vcs.cmd,
 			vcs:  vcs,
-			repo: match["repo"],
-			root: match["root"],
 		}
 		return rr, nil
 	}
 	return nil, errUnknownSite
 }
 
-// repoRootForImportDynamic finds a *repoRoot for a custom domain that's not
+// repoRootForImportDynamic finds a *RepoRoot for a custom domain that's not
 // statically known by repoRootForImportPathStatic.
 //
 // This handles custom import paths like "name.tld/pkg/foo" or just "name.tld".
-func repoRootForImportDynamic(importPath string, security web.SecurityMode) (*repoRoot, error) {
+func repoRootForImportDynamic(importPath string, mod ModuleMode, security web.SecurityMode) (*RepoRoot, error) {
 	slash := strings.Index(importPath, "/")
 	if slash < 0 {
 		slash = len(importPath)
@@ -772,7 +776,7 @@ func repoRootForImportDynamic(importPath string, security web.SecurityMode) (*re
 		return nil, fmt.Errorf(msg, err)
 	}
 	defer body.Close()
-	imports, err := parseMetaGoImports(body)
+	imports, err := parseMetaGoImports(body, mod)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %v", importPath, err)
 	}
@@ -799,7 +803,7 @@ func repoRootForImportDynamic(importPath string, security web.SecurityMode) (*re
 		}
 		urlStr0 := urlStr
 		var imports []metaImport
-		urlStr, imports, err = metaImportsForPrefix(mmi.Prefix, security)
+		urlStr, imports, err = metaImportsForPrefix(mmi.Prefix, mod, security)
 		if err != nil {
 			return nil, err
 		}
@@ -812,14 +816,17 @@ func repoRootForImportDynamic(importPath string, security web.SecurityMode) (*re
 	if err := validateRepoRoot(mmi.RepoRoot); err != nil {
 		return nil, fmt.Errorf("%s: invalid repo root %q: %v", urlStr, mmi.RepoRoot, err)
 	}
-	rr := &repoRoot{
-		vcs:      vcsByCmd(mmi.VCS),
-		repo:     mmi.RepoRoot,
-		root:     mmi.Prefix,
-		isCustom: true,
-	}
-	if rr.vcs == nil {
+	vcs := vcsByCmd(mmi.VCS)
+	if vcs == nil && mmi.VCS != "mod" {
 		return nil, fmt.Errorf("%s: unknown vcs %q", urlStr, mmi.VCS)
+	}
+
+	rr := &RepoRoot{
+		Repo:     mmi.RepoRoot,
+		Root:     mmi.Prefix,
+		IsCustom: true,
+		VCS:      mmi.VCS,
+		vcs:      vcs,
 	}
 	return rr, nil
 }
@@ -851,7 +858,7 @@ var (
 // It is an error if no imports are found.
 // urlStr will still be valid if err != nil.
 // The returned urlStr will be of the form "https://golang.org/x/tools?go-get=1"
-func metaImportsForPrefix(importPrefix string, security web.SecurityMode) (urlStr string, imports []metaImport, err error) {
+func metaImportsForPrefix(importPrefix string, mod ModuleMode, security web.SecurityMode) (urlStr string, imports []metaImport, err error) {
 	setCache := func(res fetchResult) (fetchResult, error) {
 		fetchCacheMu.Lock()
 		defer fetchCacheMu.Unlock()
@@ -871,7 +878,7 @@ func metaImportsForPrefix(importPrefix string, security web.SecurityMode) (urlSt
 		if err != nil {
 			return setCache(fetchResult{urlStr: urlStr, err: fmt.Errorf("fetch %s: %v", urlStr, err)})
 		}
-		imports, err := parseMetaGoImports(body)
+		imports, err := parseMetaGoImports(body, mod)
 		if err != nil {
 			return setCache(fetchResult{urlStr: urlStr, err: fmt.Errorf("parsing %s: %v", urlStr, err)})
 		}
@@ -896,16 +903,16 @@ type metaImport struct {
 	Prefix, VCS, RepoRoot string
 }
 
-func splitPathHasPrefix(path, prefix []string) bool {
-	if len(path) < len(prefix) {
+// pathPrefix reports whether sub is a prefix of s,
+// only considering entire path components.
+func pathPrefix(s, sub string) bool {
+	// strings.HasPrefix is necessary but not sufficient.
+	if !strings.HasPrefix(s, sub) {
 		return false
 	}
-	for i, p := range prefix {
-		if path[i] != p {
-			return false
-		}
-	}
-	return true
+	// The remainder after the prefix must either be empty or start with a slash.
+	rem := s[len(sub):]
+	return rem == "" || rem[0] == '/'
 }
 
 // A ImportMismatchError is returned where metaImport/s are present
@@ -928,18 +935,21 @@ func (m ImportMismatchError) Error() string {
 // errNoMatch is returned if none match.
 func matchGoImport(imports []metaImport, importPath string) (metaImport, error) {
 	match := -1
-	imp := strings.Split(importPath, "/")
 
 	errImportMismatch := ImportMismatchError{importPath: importPath}
 	for i, im := range imports {
-		pre := strings.Split(im.Prefix, "/")
-
-		if !splitPathHasPrefix(imp, pre) {
+		if !pathPrefix(importPath, im.Prefix) {
 			errImportMismatch.mismatches = append(errImportMismatch.mismatches, im.Prefix)
 			continue
 		}
 
-		if match != -1 {
+		if match >= 0 {
+			if imports[match].VCS == "mod" && im.VCS != "mod" {
+				// All the mod entries precede all the non-mod entries.
+				// We have a mod entry and don't care about the rest,
+				// matching or not.
+				break
+			}
 			return metaImport{}, fmt.Errorf("multiple meta tags match import path %q", importPath)
 		}
 		match = i
@@ -953,10 +963,14 @@ func matchGoImport(imports []metaImport, importPath string) (metaImport, error) 
 
 // expand rewrites s to replace {k} with match[k] for each key k in match.
 func expand(match map[string]string, s string) string {
+	// We want to replace each match exactly once, and the result of expansion
+	// must not depend on the iteration order through the map.
+	// A strings.Replacer has exactly the properties we're looking for.
+	oldNew := make([]string, 0, 2*len(match))
 	for k, v := range match {
-		s = strings.Replace(s, "{"+k+"}", v, -1)
+		oldNew = append(oldNew, "{"+k+"}", v)
 	}
-	return s
+	return strings.NewReplacer(oldNew...).Replace(s)
 }
 
 // vcsPaths defines the meaning of import paths referring to
@@ -967,7 +981,7 @@ var vcsPaths = []*vcsPath{
 	// Github
 	{
 		prefix: "github.com/",
-		re:     `^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[\p{L}0-9_.\-]+)*$`,
+		regexp: lazyregexp.New(`^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[\p{L}0-9_.\-]+)*$`),
 		vcs:    "git",
 		repo:   "https://{root}",
 		check:  noVCSSuffix,
@@ -976,7 +990,7 @@ var vcsPaths = []*vcsPath{
 	// Bitbucket
 	{
 		prefix: "bitbucket.org/",
-		re:     `^(?P<root>bitbucket\.org/(?P<bitname>[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+))(/[A-Za-z0-9_.\-]+)*$`,
+		regexp: lazyregexp.New(`^(?P<root>bitbucket\.org/(?P<bitname>[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+))(/[A-Za-z0-9_.\-]+)*$`),
 		repo:   "https://{root}",
 		check:  bitbucketVCS,
 	},
@@ -984,7 +998,7 @@ var vcsPaths = []*vcsPath{
 	// IBM DevOps Services (JazzHub)
 	{
 		prefix: "hub.jazz.net/git/",
-		re:     `^(?P<root>hub\.jazz\.net/git/[a-z0-9]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`,
+		regexp: lazyregexp.New(`^(?P<root>hub\.jazz\.net/git/[a-z0-9]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`),
 		vcs:    "git",
 		repo:   "https://{root}",
 		check:  noVCSSuffix,
@@ -993,7 +1007,7 @@ var vcsPaths = []*vcsPath{
 	// Git at Apache
 	{
 		prefix: "git.apache.org/",
-		re:     `^(?P<root>git\.apache\.org/[a-z0-9_.\-]+\.git)(/[A-Za-z0-9_.\-]+)*$`,
+		regexp: lazyregexp.New(`^(?P<root>git\.apache\.org/[a-z0-9_.\-]+\.git)(/[A-Za-z0-9_.\-]+)*$`),
 		vcs:    "git",
 		repo:   "https://{root}",
 	},
@@ -1001,7 +1015,7 @@ var vcsPaths = []*vcsPath{
 	// Git at OpenStack
 	{
 		prefix: "git.openstack.org/",
-		re:     `^(?P<root>git\.openstack\.org/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(\.git)?(/[A-Za-z0-9_.\-]+)*$`,
+		regexp: lazyregexp.New(`^(?P<root>git\.openstack\.org/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(\.git)?(/[A-Za-z0-9_.\-]+)*$`),
 		vcs:    "git",
 		repo:   "https://{root}",
 	},
@@ -1009,7 +1023,7 @@ var vcsPaths = []*vcsPath{
 	// chiselapp.com for fossil
 	{
 		prefix: "chiselapp.com/",
-		re:     `^(?P<root>chiselapp\.com/user/[A-Za-z0-9]+/repository/[A-Za-z0-9_.\-]+)$`,
+		regexp: lazyregexp.New(`^(?P<root>chiselapp\.com/user/[A-Za-z0-9]+/repository/[A-Za-z0-9_.\-]+)$`),
 		vcs:    "fossil",
 		repo:   "https://{root}",
 	},
@@ -1017,8 +1031,8 @@ var vcsPaths = []*vcsPath{
 	// General syntax for any server.
 	// Must be last.
 	{
-		re:   `^(?P<root>(?P<repo>([a-z0-9.\-]+\.)+[a-z0-9.\-]+(:[0-9]+)?(/~?[A-Za-z0-9_.\-]+)+?)\.(?P<vcs>bzr|fossil|git|hg|svn))(/~?[A-Za-z0-9_.\-]+)*$`,
-		ping: true,
+		regexp: lazyregexp.New(`(?P<root>(?P<repo>([a-z0-9.\-]+\.)+[a-z0-9.\-]+(:[0-9]+)?(/~?[A-Za-z0-9_.\-]+)+?)\.(?P<vcs>bzr|fossil|git|hg|svn))(/~?[A-Za-z0-9_.\-]+)*$`),
+		ping:   true,
 	},
 }
 
@@ -1030,23 +1044,11 @@ var vcsPathsAfterDynamic = []*vcsPath{
 	// Launchpad. See golang.org/issue/11436.
 	{
 		prefix: "launchpad.net/",
-		re:     `^(?P<root>launchpad\.net/((?P<project>[A-Za-z0-9_.\-]+)(?P<series>/[A-Za-z0-9_.\-]+)?|~[A-Za-z0-9_.\-]+/(\+junk|[A-Za-z0-9_.\-]+)/[A-Za-z0-9_.\-]+))(/[A-Za-z0-9_.\-]+)*$`,
+		regexp: lazyregexp.New(`^(?P<root>launchpad\.net/((?P<project>[A-Za-z0-9_.\-]+)(?P<series>/[A-Za-z0-9_.\-]+)?|~[A-Za-z0-9_.\-]+/(\+junk|[A-Za-z0-9_.\-]+)/[A-Za-z0-9_.\-]+))(/[A-Za-z0-9_.\-]+)*$`),
 		vcs:    "bzr",
 		repo:   "https://{root}",
 		check:  launchpadVCS,
 	},
-}
-
-func init() {
-	// fill in cached regexps.
-	// Doing this eagerly discovers invalid regexp syntax
-	// without having to run a command that needs that regexp.
-	for _, srv := range vcsPaths {
-		srv.regexp = regexp.MustCompile(srv.re)
-	}
-	for _, srv := range vcsPathsAfterDynamic {
-		srv.regexp = regexp.MustCompile(srv.re)
-	}
 }
 
 // noVCSSuffix checks that the repository name does not

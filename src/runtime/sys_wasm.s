@@ -117,7 +117,7 @@ TEXT runtime·wasmTruncS(SB), NOSPLIT, $0-0
 	End
 
 	Get R0
-	I64TruncSF64
+	I64TruncF64S
 	Return
 
 TEXT runtime·wasmTruncU(SB), NOSPLIT, $0-0
@@ -146,15 +146,8 @@ TEXT runtime·wasmTruncU(SB), NOSPLIT, $0-0
 	End
 
 	Get R0
-	I64TruncUF64
+	I64TruncF64U
 	Return
-
-TEXT runtime·exit(SB), NOSPLIT, $0-8
-	Call runtime·wasmExit(SB)
-	Drop
-	I32Const $0
-	Set SP
-	I32Const $1
 
 TEXT runtime·exitThread(SB), NOSPLIT, $0-0
 	UNDEF
@@ -191,5 +184,17 @@ TEXT ·nanotime(SB), NOSPLIT, $0
 	RET
 
 TEXT ·walltime(SB), NOSPLIT, $0
+	CallImport
+	RET
+
+TEXT ·scheduleTimeoutEvent(SB), NOSPLIT, $0
+	CallImport
+	RET
+
+TEXT ·clearTimeoutEvent(SB), NOSPLIT, $0
+	CallImport
+	RET
+
+TEXT ·getRandomData(SB), NOSPLIT, $0
 	CallImport
 	RET

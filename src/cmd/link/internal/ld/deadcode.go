@@ -60,8 +60,8 @@ func deadcode(ctxt *Link) {
 	d.init()
 	d.flood()
 
-	callSym := ctxt.Syms.ROLookup("reflect.Value.Call", 0)
-	methSym := ctxt.Syms.ROLookup("reflect.Value.Method", 0)
+	callSym := ctxt.Syms.ROLookup("reflect.Value.Call", sym.SymVerABIInternal)
+	methSym := ctxt.Syms.ROLookup("reflect.Value.Method", sym.SymVerABIInternal)
 	reflectSeen := false
 
 	if ctxt.DynlinkingGo() {
@@ -190,7 +190,9 @@ func (d *deadcodepass) mark(s, parent *sym.Symbol) {
 		fmt.Printf("%s -> %s\n", p, s.Name)
 	}
 	s.Attr |= sym.AttrReachable
-	s.Reachparent = parent
+	if d.ctxt.Reachparent != nil {
+		d.ctxt.Reachparent[s] = parent
+	}
 	d.markQueue = append(d.markQueue, s)
 }
 
@@ -206,11 +208,6 @@ func (d *deadcodepass) markMethod(m methodref) {
 // In a typical binary, this is *flagEntrySymbol.
 func (d *deadcodepass) init() {
 	var names []string
-
-	if d.ctxt.Arch.Family == sys.ARM {
-		// mark some functions that are only referenced after linker code editing
-		names = append(names, "runtime.read_tls_fallback")
-	}
 
 	if d.ctxt.BuildMode == BuildModeShared {
 		// Mark all symbols defined in this library as reachable when
@@ -243,8 +240,8 @@ func (d *deadcodepass) init() {
 				// but we do keep the symbols it refers to.
 				exports := d.ctxt.Syms.ROLookup("go.plugin.exports", 0)
 				if exports != nil {
-					for _, r := range exports.R {
-						d.mark(r.Sym, nil)
+					for i := range exports.R {
+						d.mark(exports.R[i].Sym, nil)
 					}
 				}
 			}
@@ -255,7 +252,10 @@ func (d *deadcodepass) init() {
 	}
 
 	for _, name := range names {
+		// Mark symbol as an data/ABI0 symbol.
 		d.mark(d.ctxt.Syms.ROLookup(name, 0), nil)
+		// Also mark any Go functions (internal ABI).
+		d.mark(d.ctxt.Syms.ROLookup(name, sym.SymVerABIInternal), nil)
 	}
 }
 
@@ -305,6 +305,11 @@ func (d *deadcodepass) flood() {
 				// enough to mark the pointed-to symbol as
 				// reachable.
 				continue
+			}
+			if r.Sym.Type == sym.SABIALIAS {
+				// Patch this relocation through the
+				// ABI alias before marking.
+				r.Sym = resolveABIAlias(r.Sym)
 			}
 			if r.Type != objabi.R_METHODOFF {
 				d.mark(r.Sym, s)

@@ -103,7 +103,7 @@ func init() {
 		{name: "LoweredClosureCall", argLength: 3, reg: regInfo{inputs: []regMask{gp, gp, 0}, clobbers: callerSave}, aux: "Int64", call: true}, // call function via closure. arg0=codeptr, arg1=closure, arg2=mem, auxint=argsize, returns mem
 		{name: "LoweredInterCall", argLength: 2, reg: regInfo{inputs: []regMask{gp}, clobbers: callerSave}, aux: "Int64", call: true},          // call fn by pointer. arg0=codeptr, arg1=mem, auxint=argsize, returns mem
 
-		{name: "LoweredAddr", argLength: 1, reg: gp11, aux: "SymOff", rematerializeable: true, symEffect: "Addr"}, // returns base+aux, arg0=base
+		{name: "LoweredAddr", argLength: 1, reg: gp11, aux: "SymOff", rematerializeable: true, symEffect: "Addr"}, // returns base+aux+auxint, arg0=base
 		{name: "LoweredMove", argLength: 3, reg: regInfo{inputs: []regMask{gp, gp}}, aux: "Int64"},                // large move. arg0=dst, arg1=src, arg2=mem, auxint=len/8, returns mem
 		{name: "LoweredZero", argLength: 2, reg: regInfo{inputs: []regMask{gp}}, aux: "Int64"},                    // large zeroing. arg0=start, arg1=mem, auxint=len/8, returns mem
 
@@ -187,16 +187,16 @@ func init() {
 		{name: "F64Mul", asm: "F64Mul", argLength: 2, reg: fp21, typ: "Float64"}, // arg0 * arg1
 		{name: "F64Div", asm: "F64Div", argLength: 2, reg: fp21, typ: "Float64"}, // arg0 / arg1
 
-		{name: "I64TruncSF64", asm: "I64TruncSF64", argLength: 1, reg: regInfo{inputs: []regMask{fp}, outputs: []regMask{gp}}, typ: "Int64"},       // truncates the float arg0 to a signed integer
-		{name: "I64TruncUF64", asm: "I64TruncUF64", argLength: 1, reg: regInfo{inputs: []regMask{fp}, outputs: []regMask{gp}}, typ: "Int64"},       // truncates the float arg0 to an unsigned integer
-		{name: "F64ConvertSI64", asm: "F64ConvertSI64", argLength: 1, reg: regInfo{inputs: []regMask{gp}, outputs: []regMask{fp}}, typ: "Float64"}, // converts the signed integer arg0 to a float
-		{name: "F64ConvertUI64", asm: "F64ConvertUI64", argLength: 1, reg: regInfo{inputs: []regMask{gp}, outputs: []regMask{fp}}, typ: "Float64"}, // converts the unsigned integer arg0 to a float
+		{name: "I64TruncF64S", asm: "I64TruncF64S", argLength: 1, reg: regInfo{inputs: []regMask{fp}, outputs: []regMask{gp}}, typ: "Int64"},       // truncates the float arg0 to a signed integer
+		{name: "I64TruncF64U", asm: "I64TruncF64U", argLength: 1, reg: regInfo{inputs: []regMask{fp}, outputs: []regMask{gp}}, typ: "Int64"},       // truncates the float arg0 to an unsigned integer
+		{name: "F64ConvertI64S", asm: "F64ConvertI64S", argLength: 1, reg: regInfo{inputs: []regMask{gp}, outputs: []regMask{fp}}, typ: "Float64"}, // converts the signed integer arg0 to a float
+		{name: "F64ConvertI64U", asm: "F64ConvertI64U", argLength: 1, reg: regInfo{inputs: []regMask{gp}, outputs: []regMask{fp}}, typ: "Float64"}, // converts the unsigned integer arg0 to a float
 	}
 
 	archs = append(archs, arch{
 		name:            "Wasm",
 		pkg:             "cmd/internal/obj/wasm",
-		genfile:         "",
+		genfile:         "../../wasm/ssa.go",
 		ops:             WasmOps,
 		blocks:          nil,
 		regnames:        regNamesWasm,

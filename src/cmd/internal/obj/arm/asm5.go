@@ -1529,7 +1529,7 @@ func buildop(ctxt *obj.Link) {
 		return
 	}
 
-	deferreturn = ctxt.Lookup("runtime.deferreturn")
+	deferreturn = ctxt.LookupABI("runtime.deferreturn", obj.ABIInternal)
 
 	symdiv = ctxt.Lookup("runtime._div")
 	symdivu = ctxt.Lookup("runtime._divu")
@@ -2007,7 +2007,7 @@ func (c *ctxt5) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		o2 = c.oprrr(p, p.As, int(p.Scond))
 		o2 |= REGTMP & 15
 		r := int(p.Reg)
-		if p.As == AMOVW || p.As == AMVN {
+		if p.As == AMVN {
 			r = 0
 		} else if r == 0 {
 			r = int(p.To.Reg)
@@ -2045,16 +2045,6 @@ func (c *ctxt5) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		r := int(p.Reg)
 		if r == 0 {
 			r = rt
-		}
-		if rt == r {
-			r = rf
-			rf = rt
-		}
-
-		if false {
-			if rt == r || rf == REGPC&15 || r == REGPC&15 || rt == REGPC&15 {
-				c.ctxt.Diag("%v: bad registers in MUL", p)
-			}
 		}
 
 		o1 |= (uint32(rf)&15)<<8 | (uint32(r)&15)<<0 | (uint32(rt)&15)<<16

@@ -7,30 +7,20 @@
 
 TEXT ·Compare(SB), NOSPLIT, $0-56
 	Get SP
-	I64Load s1_base+0(FP)
-	I64Load s1_len+8(FP)
-	I64Load s2_base+24(FP)
-	I64Load s2_len+32(FP)
-	Call cmpbody<>(SB)
-	I64Store ret+48(FP)
-	RET
-
-TEXT bytes·Compare(SB), NOSPLIT, $0-56
-	Get SP
-	I64Load s1_base+0(FP)
-	I64Load s1_len+8(FP)
-	I64Load s2_base+24(FP)
-	I64Load s2_len+32(FP)
+	I64Load a_base+0(FP)
+	I64Load a_len+8(FP)
+	I64Load b_base+24(FP)
+	I64Load b_len+32(FP)
 	Call cmpbody<>(SB)
 	I64Store ret+48(FP)
 	RET
 
 TEXT runtime·cmpstring(SB), NOSPLIT, $0-40
 	Get SP
-	I64Load s1_base+0(FP)
-	I64Load s1_len+8(FP)
-	I64Load s2_base+16(FP)
-	I64Load s2_len+24(FP)
+	I64Load a_base+0(FP)
+	I64Load a_len+8(FP)
+	I64Load b_base+16(FP)
+	I64Load b_len+24(FP)
 	Call cmpbody<>(SB)
 	I64Store ret+32(FP)
 	RET
@@ -54,7 +44,7 @@ TEXT cmpbody<>(SB), NOSPLIT, $0-0
 	Get R4
 	I32WrapI64
 	Call memcmp<>(SB)
-	I64ExtendSI32
+	I64ExtendI32S
 	Set R5
 
 	Get R5

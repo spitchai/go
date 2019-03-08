@@ -38,7 +38,7 @@ func httpTrace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	html := strings.Replace(templTrace, "{{PARAMS}}", r.Form.Encode(), -1)
+	html := strings.ReplaceAll(templTrace, "{{PARAMS}}", r.Form.Encode())
 	w.Write([]byte(html))
 
 }
@@ -185,11 +185,15 @@ func httpJsonTrace(w http.ResponseWriter, r *http.Request) {
 		// If goid argument is present, we are rendering a trace for this particular goroutine.
 		goid, err := strconv.ParseUint(goids, 10, 64)
 		if err != nil {
-			log.Printf("failed to parse goid parameter '%v': %v", goids, err)
+			log.Printf("failed to parse goid parameter %q: %v", goids, err)
 			return
 		}
 		analyzeGoroutines(res.Events)
-		g := gs[goid]
+		g, ok := gs[goid]
+		if !ok {
+			log.Printf("failed to find goroutine %d", goid)
+			return
+		}
 		params.mode = modeGoroutineOriented
 		params.startTime = g.StartTime
 		if g.EndTime != 0 {
@@ -216,7 +220,7 @@ func httpJsonTrace(w http.ResponseWriter, r *http.Request) {
 		params.startTime = task.firstTimestamp() - 1
 		params.endTime = task.lastTimestamp() + 1
 		params.maing = goid
-		params.tasks = task.decendents()
+		params.tasks = task.descendants()
 		gs := map[uint64]bool{}
 		for _, t := range params.tasks {
 			// find only directly involved goroutines
@@ -240,7 +244,7 @@ func httpJsonTrace(w http.ResponseWriter, r *http.Request) {
 		params.mode = modeTaskOriented
 		params.startTime = task.firstTimestamp() - 1
 		params.endTime = task.lastTimestamp() + 1
-		params.tasks = task.decendents()
+		params.tasks = task.descendants()
 	}
 
 	start := int64(0)
@@ -249,12 +253,12 @@ func httpJsonTrace(w http.ResponseWriter, r *http.Request) {
 		// If start/end arguments are present, we are rendering a range of the trace.
 		start, err = strconv.ParseInt(startStr, 10, 64)
 		if err != nil {
-			log.Printf("failed to parse start parameter '%v': %v", startStr, err)
+			log.Printf("failed to parse start parameter %q: %v", startStr, err)
 			return
 		}
 		end, err = strconv.ParseInt(endStr, 10, 64)
 		if err != nil {
-			log.Printf("failed to parse end parameter '%v': %v", endStr, err)
+			log.Printf("failed to parse end parameter %q: %v", endStr, err)
 			return
 		}
 	}
@@ -267,9 +271,15 @@ func httpJsonTrace(w http.ResponseWriter, r *http.Request) {
 }
 
 type Range struct {
-	Name  string
-	Start int
-	End   int
+	Name      string
+	Start     int
+	End       int
+	StartTime int64
+	EndTime   int64
+}
+
+func (r Range) URL() string {
+	return fmt.Sprintf("/trace?start=%d&end=%d", r.Start, r.End)
 }
 
 // splitTrace splits the trace into a number of ranges,
@@ -340,10 +350,14 @@ func splittingTraceConsumer(max int) (*splitter, traceConsumer) {
 			start := 0
 			for i, ev := range sizes {
 				if sum+ev.Sz > max {
+					startTime := time.Duration(sizes[start].Time * 1000)
+					endTime := time.Duration(ev.Time * 1000)
 					ranges = append(ranges, Range{
-						Name:  fmt.Sprintf("%v-%v", time.Duration(sizes[start].Time*1000), time.Duration(ev.Time*1000)),
-						Start: start,
-						End:   i + 1,
+						Name:      fmt.Sprintf("%v-%v", startTime, endTime),
+						Start:     start,
+						End:       i + 1,
+						StartTime: int64(startTime),
+						EndTime:   int64(endTime),
 					})
 					start = i + 1
 					sum = minSize
@@ -358,9 +372,11 @@ func splittingTraceConsumer(max int) (*splitter, traceConsumer) {
 
 			if end := len(sizes) - 1; start < end {
 				ranges = append(ranges, Range{
-					Name:  fmt.Sprintf("%v-%v", time.Duration(sizes[start].Time*1000), time.Duration(sizes[end].Time*1000)),
-					Start: start,
-					End:   end,
+					Name:      fmt.Sprintf("%v-%v", time.Duration(sizes[start].Time*1000), time.Duration(sizes[end].Time*1000)),
+					Start:     start,
+					End:       end,
+					StartTime: int64(sizes[start].Time * 1000),
+					EndTime:   int64(sizes[end].Time * 1000),
 				})
 			}
 			s.Ranges = ranges
@@ -415,9 +431,9 @@ type heapStats struct {
 }
 
 type threadStats struct {
-	insyscallRuntime uint64 // system goroutine in syscall
-	insyscall        uint64 // user goroutine in syscall
-	prunning         uint64 // thread running P
+	insyscallRuntime int64 // system goroutine in syscall
+	insyscall        int64 // user goroutine in syscall
+	prunning         int64 // thread running P
 }
 
 type frameNode struct {
@@ -681,13 +697,14 @@ func generateTrace(params *traceParams, consumer traceConsumer) error {
 			}
 			ctx.emitSlice(&fakeMarkStart, text)
 		case trace.EvGCSweepStart:
-			slice := ctx.emitSlice(ev, "SWEEP")
+			slice := ctx.makeSlice(ev, "SWEEP")
 			if done := ev.Link; done != nil && done.Args[0] != 0 {
 				slice.Arg = struct {
 					Swept     uint64 `json:"Swept bytes"`
 					Reclaimed uint64 `json:"Reclaimed bytes"`
 				}{done.Args[0], done.Args[1]}
 			}
+			ctx.emit(slice)
 		case trace.EvGoStart, trace.EvGoStartLabel:
 			info := getGInfo(ev.G)
 			if ev.Type == trace.EvGoStartLabel {
@@ -842,7 +859,11 @@ func (ctx *traceContext) proc(ev *trace.Event) uint64 {
 	}
 }
 
-func (ctx *traceContext) emitSlice(ev *trace.Event, name string) *ViewerEvent {
+func (ctx *traceContext) emitSlice(ev *trace.Event, name string) {
+	ctx.emit(ctx.makeSlice(ev, name))
+}
+
+func (ctx *traceContext) makeSlice(ev *trace.Event, name string) *ViewerEvent {
 	// If ViewerEvent.Dur is not a positive value,
 	// trace viewer handles it as a non-terminating time interval.
 	// Avoid it by setting the field with a small value.
@@ -881,7 +902,6 @@ func (ctx *traceContext) emitSlice(ev *trace.Event, name string) *ViewerEvent {
 			sl.Cname = colorLightGrey
 		}
 	}
-	ctx.emit(sl)
 	return sl
 }
 
@@ -1006,8 +1026,8 @@ func (ctx *traceContext) emitGoroutineCounters(ev *trace.Event) {
 }
 
 type threadCountersArg struct {
-	Running   uint64
-	InSyscall uint64
+	Running   int64
+	InSyscall int64
 }
 
 func (ctx *traceContext) emitThreadCounters(ev *trace.Event) {
@@ -1199,38 +1219,38 @@ func viewerDataTraceConsumer(w io.Writer, start, end int64) traceConsumer {
 // https://github.com/catapult-project/catapult/blob/master/tracing/tracing/base/color_scheme.html#L50
 // The chrome trace viewer allows only those as cname values.
 const (
-	colorLightMauve     string = "thread_state_uninterruptible" // 182, 125, 143
-	colorOrange                = "thread_state_iowait"          // 255, 140, 0
-	colorSeafoamGreen          = "thread_state_running"         // 126, 200, 148
-	colorVistaBlue             = "thread_state_runnable"        // 133, 160, 210
-	colorTan                   = "thread_state_unknown"         // 199, 155, 125
-	colorIrisBlue              = "background_memory_dump"       // 0, 180, 180
-	colorMidnightBlue          = "light_memory_dump"            // 0, 0, 180
-	colorDeepMagenta           = "detailed_memory_dump"         // 180, 0, 180
-	colorBlue                  = "vsync_highlight_color"        // 0, 0, 255
-	colorGrey                  = "generic_work"                 // 125, 125, 125
-	colorGreen                 = "good"                         // 0, 125, 0
-	colorDarkGoldenrod         = "bad"                          // 180, 125, 0
-	colorPeach                 = "terrible"                     // 180, 0, 0
-	colorBlack                 = "black"                        // 0, 0, 0
-	colorLightGrey             = "grey"                         // 221, 221, 221
-	colorWhite                 = "white"                        // 255, 255, 255
-	colorYellow                = "yellow"                       // 255, 255, 0
-	colorOlive                 = "olive"                        // 100, 100, 0
-	colorCornflowerBlue        = "rail_response"                // 67, 135, 253
-	colorSunsetOrange          = "rail_animation"               // 244, 74, 63
-	colorTangerine             = "rail_idle"                    // 238, 142, 0
-	colorShamrockGreen         = "rail_load"                    // 13, 168, 97
-	colorGreenishYellow        = "startup"                      // 230, 230, 0
-	colorDarkGrey              = "heap_dump_stack_frame"        // 128, 128, 128
-	colorTawny                 = "heap_dump_child_node_arrow"   // 204, 102, 0
-	colorLemon                 = "cq_build_running"             // 255, 255, 119
-	colorLime                  = "cq_build_passed"              // 153, 238, 102
-	colorPink                  = "cq_build_failed"              // 238, 136, 136
-	colorSilver                = "cq_build_abandoned"           // 187, 187, 187
-	colorManzGreen             = "cq_build_attempt_runnig"      // 222, 222, 75
-	colorKellyGreen            = "cq_build_attempt_passed"      // 108, 218, 35
-	colorAnotherGrey           = "cq_build_attempt_failed"      // 187, 187, 187
+	colorLightMauve     = "thread_state_uninterruptible" // 182, 125, 143
+	colorOrange         = "thread_state_iowait"          // 255, 140, 0
+	colorSeafoamGreen   = "thread_state_running"         // 126, 200, 148
+	colorVistaBlue      = "thread_state_runnable"        // 133, 160, 210
+	colorTan            = "thread_state_unknown"         // 199, 155, 125
+	colorIrisBlue       = "background_memory_dump"       // 0, 180, 180
+	colorMidnightBlue   = "light_memory_dump"            // 0, 0, 180
+	colorDeepMagenta    = "detailed_memory_dump"         // 180, 0, 180
+	colorBlue           = "vsync_highlight_color"        // 0, 0, 255
+	colorGrey           = "generic_work"                 // 125, 125, 125
+	colorGreen          = "good"                         // 0, 125, 0
+	colorDarkGoldenrod  = "bad"                          // 180, 125, 0
+	colorPeach          = "terrible"                     // 180, 0, 0
+	colorBlack          = "black"                        // 0, 0, 0
+	colorLightGrey      = "grey"                         // 221, 221, 221
+	colorWhite          = "white"                        // 255, 255, 255
+	colorYellow         = "yellow"                       // 255, 255, 0
+	colorOlive          = "olive"                        // 100, 100, 0
+	colorCornflowerBlue = "rail_response"                // 67, 135, 253
+	colorSunsetOrange   = "rail_animation"               // 244, 74, 63
+	colorTangerine      = "rail_idle"                    // 238, 142, 0
+	colorShamrockGreen  = "rail_load"                    // 13, 168, 97
+	colorGreenishYellow = "startup"                      // 230, 230, 0
+	colorDarkGrey       = "heap_dump_stack_frame"        // 128, 128, 128
+	colorTawny          = "heap_dump_child_node_arrow"   // 204, 102, 0
+	colorLemon          = "cq_build_running"             // 255, 255, 119
+	colorLime           = "cq_build_passed"              // 153, 238, 102
+	colorPink           = "cq_build_failed"              // 238, 136, 136
+	colorSilver         = "cq_build_abandoned"           // 187, 187, 187
+	colorManzGreen      = "cq_build_attempt_runnig"      // 222, 222, 75
+	colorKellyGreen     = "cq_build_attempt_passed"      // 108, 218, 35
+	colorAnotherGrey    = "cq_build_attempt_failed"      // 187, 187, 187
 )
 
 var colorForTask = []string{
